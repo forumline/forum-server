@@ -1,0 +1,20 @@
+version: "2"
+
+linters:
+  enable:
+    - errcheck
+    - staticcheck
+    - govet
+    - gosec          # security: hardcoded creds, weak crypto, unvalidated TLS
+    - bodyclose      # catches unclosed HTTP response bodies
+    - rowserrcheck   # catches missing rows.Err() after iteration
+    - noctx          # catches HTTP requests sent without context (no timeout)
+
+  settings:
+    errcheck:
+      check-type-assertions: true
+      check-blank: false
+    gosec:
+      excludes:
+        - G104  # already covered by errcheck
+        - G304  # file path from variable (too noisy for template loading)

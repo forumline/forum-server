@@ -1,0 +1,66 @@
+name: Deploy to demo.forumline.net
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    env:
+      CF_ACCESS_CLIENT_ID: ${{ secrets.CF_ACCESS_CLIENT_ID }}
+      CF_ACCESS_CLIENT_SECRET: ${{ secrets.CF_ACCESS_CLIENT_SECRET }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Fetch encrypted env from monorepo
+        run: |
+          curl -fsSL \
+            "https://raw.githubusercontent.com/forumline/forumline/main/forum-server/deploy/.env.enc" \
+            -o /tmp/.env.enc
+
+      - name: Install sops and age
+        run: |
+          curl -fsSL "https://dl.filippo.io/age/v1.2.0?for=linux/amd64" -o /tmp/age.tar.gz
+          tar -xzf /tmp/age.tar.gz -C /tmp && sudo mv /tmp/age/age /usr/local/bin/
+          curl -fsSL "https://github.com/getsops/sops/releases/download/v3.9.4/sops-v3.9.4.linux.amd64" -o /tmp/sops
+          chmod +x /tmp/sops && sudo mv /tmp/sops /usr/local/bin/sops
+
+      - name: Decrypt secrets
+        env:
+          SOPS_AGE_KEY: ${{ secrets.SOPS_AGE_KEY }}
+        run: sops -d --input-type dotenv --output-type dotenv /tmp/.env.enc > /tmp/forum.env
+
+      - name: Install cloudflared
+        run: |
+          curl -fsSL https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64.deb -o /tmp/cloudflared.deb
+          sudo dpkg -i /tmp/cloudflared.deb
+
+      - name: Set up SSH key
+        run: |
+          mkdir -p ~/.ssh
+          echo "${{ secrets.FORUM_SSH_KEY }}" > ~/.ssh/id_deploy
+          chmod 600 ~/.ssh/id_deploy
+          cat >> ~/.ssh/config <<EOF
+          Host forum-prod
+            HostName ssh.forumline.net
+            User root
+            IdentityFile ~/.ssh/id_deploy
+            StrictHostKeyChecking no
+            ProxyCommand cloudflared access ssh --hostname %h --id $CF_ACCESS_CLIENT_ID --secret $CF_ACCESS_CLIENT_SECRET
+          EOF
+
+      - name: Deploy
+        run: |
+          scp /tmp/forum.env forum-prod:/opt/forum/.env
+          scp deploy/docker-compose.prod.yml forum-prod:/opt/forum/docker-compose.yml
+          ssh forum-prod "
+            cd /opt/forum/repo &&
+            git remote set-url origin https://github.com/forumline/forum-server.git 2>/dev/null || true &&
+            git fetch origin main &&
+            git reset --hard origin/main &&
+            cd /opt/forum &&
+            docker compose up -d --build forum &&
+            docker compose ps
+          "
