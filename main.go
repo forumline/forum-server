@@ -57,6 +57,7 @@ func main() {
 		SiteURL:           siteURL,
 		Domain:            domain,
 		ForumName:         os.Getenv("FORUM_NAME"),
+		IconURL:           os.Getenv("FORUM_ICON_URL"),
 		ForumlineURL:            os.Getenv("FORUMLINE_APP_URL"),
 		ForumlineClientID:       os.Getenv("FORUMLINE_CLIENT_ID"),
 		ForumlineClientSecret:   os.Getenv("FORUMLINE_CLIENT_SECRET"),

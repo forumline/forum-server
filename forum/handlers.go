@@ -24,6 +24,7 @@ type Config struct {
 	SiteURL              string
 	Domain               string
 	ForumName            string
+	IconURL              string
 	ForumlineURL               string
 	ForumlineClientID          string
 	ForumlineClientSecret      string

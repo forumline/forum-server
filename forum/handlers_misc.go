@@ -17,6 +17,7 @@ func (h *Handlers) HandleConfig(w http.ResponseWriter, r *http.Request) {
 	resp := map[string]interface{}{
 		"name":        name,
 		"hosted_mode": h.Config.GoTrueURL == "",
+		"icon_url":    h.Config.IconURL,
 	}
 	if h.Config.LiveKitURL != "" {
 		resp["livekit_url"] = h.Config.LiveKitURL
@@ -34,7 +35,7 @@ func (h *Handlers) HandleManifest(w http.ResponseWriter, r *http.Request) {
 		"forumline_version": "1",
 		"name":              name,
 		"domain":            h.Config.Domain,
-		"icon_url":          "",
+		"icon_url":          h.Config.IconURL,
 		"api_base":          h.Config.SiteURL + "/api/forumline",
 		"web_base":          h.Config.SiteURL,
 		"capabilities":      []string{"threads", "chat", "voice", "notifications"},
