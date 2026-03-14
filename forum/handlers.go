@@ -26,8 +26,6 @@ type Handlers struct {
 
 // Config holds environment-driven configuration for the forum server.
 type Config struct {
-	GoTrueURL                string
-	GoTrueServiceRoleKey     string
 	SiteURL                  string
 	Domain                   string
 	ForumName                string
@@ -36,8 +34,6 @@ type Config struct {
 	ForumlineClientID        string
 	ForumlineClientSecret    string
 	ForumlineJWTSecret       string
-	ForumlineGoTrueURL       string
-	ForumlineServiceRoleKey  string
 	LiveKitURL               string
 	LiveKitAPIKey            string
 	LiveKitAPISecret         string

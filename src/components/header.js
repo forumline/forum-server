@@ -75,8 +75,7 @@ export function renderHeader(container) {
             </div>
           </div>
         ` : `
-          <a href="/login" class="px-3 py-1.5 text-sm text-slate-300 hover:text-white transition-colors">Sign In</a>
-          <a href="/register" class="px-3 py-1.5 text-sm bg-indigo-600 hover:bg-indigo-500 text-white rounded-lg transition-colors">Sign Up</a>
+          <a href="/api/forumline/auth" class="px-3 py-1.5 text-sm bg-indigo-600 hover:bg-indigo-500 text-white rounded-lg transition-colors">Sign In</a>
         `}
       </div>
     </header>

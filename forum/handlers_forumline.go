@@ -6,7 +6,6 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
-	"io"
 	"log"
 	"net/http"
 	"net/url"
@@ -15,21 +14,13 @@ import (
 
 	"github.com/golang-jwt/jwt/v5"
 	"github.com/forumline/forum-server/forum/model"
-	shared "github.com/forumline/forumline/shared-go"
 )
 
 // HandleForumlineAuth handles GET/POST /api/forumline/auth.
-// Supports three flows:
-// 1. link_token query param — "Connect from Settings" flow
-// 2. forumline_token query param — server-side OAuth for iframe usage
-// 3. No params — redirect to Forumline authorize page
+// Supports two flows:
+// 1. forumline_token query param — server-side OAuth for iframe usage
+// 2. No params — redirect to Forumline authorize page
 func (h *Handlers) HandleForumlineAuth(w http.ResponseWriter, r *http.Request) {
-	linkToken := r.URL.Query().Get("link_token")
-	if linkToken != "" {
-		h.handleLinkRedirect(w, r, linkToken)
-		return
-	}
-
 	forumlineToken := r.URL.Query().Get("forumline_token")
 	if forumlineToken != "" {
 		h.handleServerSideAuth(w, r, forumlineToken)
@@ -37,79 +28,7 @@ func (h *Handlers) HandleForumlineAuth(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Default: redirect to Forumline authorize page
-	h.redirectToForumlineAuth(w, r, "")
-}
-
-// handleLinkRedirect handles "Connect from Settings" — verify session, set link cookie, redirect to Forumline.
-func (h *Handlers) handleLinkRedirect(w http.ResponseWriter, r *http.Request, linkToken string) {
-	// In hosted mode (no GoTrue), validate JWT directly
-	if h.isHostedMode() {
-		claims, err := shared.ValidateJWT(linkToken)
-		if err != nil || claims.Subject == "" {
-			http.Redirect(w, r, h.Config.SiteURL+"/settings?error=invalid_session", http.StatusFound)
-			return
-		}
-		h.setLinkCookiesAndRedirect(w, r, claims.Subject)
-		return
-	}
-
-	// Self-hosted mode: validate via GoTrue
-	email, err := gotrueGetUserByToken(h.Config.GoTrueURL, linkToken)
-	if err != nil || email == "" {
-		// Try JWT validation as fallback
-		claims, err := shared.ValidateJWT(linkToken)
-		if err != nil || claims.Subject == "" {
-			http.Redirect(w, r, h.Config.SiteURL+"/settings?error=invalid_session", http.StatusFound)
-			return
-		}
-		h.setLinkCookiesAndRedirect(w, r, claims.Subject)
-		return
-	}
-
-	// Get user ID from GoTrue
-	req, _ := http.NewRequestWithContext(r.Context(), http.MethodGet, h.Config.GoTrueURL+"/user", nil)
-	req.Header.Set("Authorization", "Bearer "+linkToken)
-	resp, err := http.DefaultClient.Do(req)
-	if err != nil {
-		http.Redirect(w, r, h.Config.SiteURL+"/settings?error=invalid_session", http.StatusFound)
-		return
-	}
-	defer func() { _ = resp.Body.Close() }()
-
-	var user struct {
-		ID string `json:"id"`
-	}
-	if err := json.NewDecoder(resp.Body).Decode(&user); err != nil {
-		log.Printf("failed to decode GoTrue user response: %v", err)
-	}
-	if user.ID == "" {
-		http.Redirect(w, r, h.Config.SiteURL+"/settings?error=invalid_session", http.StatusFound)
-		return
-	}
-
-	h.setLinkCookiesAndRedirect(w, r, user.ID)
-}
-
-func (h *Handlers) setLinkCookiesAndRedirect(w http.ResponseWriter, r *http.Request, userID string) {
-	state := randomHex(16)
-
-	authURL, _ := url.Parse(h.Config.ForumlineURL + "/api/oauth/authorize")
-	q := authURL.Query()
-	q.Set("client_id", h.Config.ForumlineClientID)
-	q.Set("redirect_uri", h.Config.SiteURL+"/api/forumline/auth/callback")
-	q.Set("state", state)
-	authURL.RawQuery = q.Encode()
-
-	http.SetCookie(w, &http.Cookie{
-		Name: "forumline_state", Value: state,
-		Path: "/", HttpOnly: true, SameSite: http.SameSiteNoneMode, Secure: true, MaxAge: 600,
-	})
-	http.SetCookie(w, &http.Cookie{
-		Name: "forumline_link_uid", Value: userID,
-		Path: "/", HttpOnly: true, SameSite: http.SameSiteNoneMode, Secure: true, MaxAge: 600,
-	})
-
-	http.Redirect(w, r, authURL.String(), http.StatusFound)
+	h.redirectToForumlineAuth(w, r)
 }
 
 // handleServerSideAuth does the entire OAuth exchange server-side (for iframe usage).
@@ -150,8 +69,7 @@ func (h *Handlers) handleServerSideAuth(w http.ResponseWriter, r *http.Request, 
 
 	location := resp.Header.Get("Location")
 	if location == "" {
-		respBody, _ := io.ReadAll(io.LimitReader(resp.Body, 512))
-		log.Printf("[Forumline:Auth] No redirect from Forumline authorize. Status: %d, Body: %s", resp.StatusCode, string(respBody))
+		log.Printf("[Forumline:Auth] No redirect from Forumline authorize. Status: %d", resp.StatusCode)
 		http.Redirect(w, r, h.Config.SiteURL+"/login?error=auth_failed", http.StatusFound)
 		return
 	}
@@ -173,48 +91,27 @@ func (h *Handlers) handleServerSideAuth(w http.ResponseWriter, r *http.Request, 
 	}
 
 	// Step 3: Create or link local user
-	var localUserID string
-	if h.isHostedMode() {
-		localUserID, err = h.createOrLinkUserHosted(r, identity)
-	} else {
-		localUserID, err = h.createOrLinkUser(r, identity, forumlineAccessToken)
-	}
+	localUserID, err := h.createOrLinkUser(r, identity)
 	if err != nil {
 		log.Printf("[Forumline:Auth] createOrLinkUser failed: %v", err)
-		if strings.Contains(err.Error(), "EMAIL_COLLISION") {
-			http.Redirect(w, r, h.Config.SiteURL+"/login?error=email_exists", http.StatusFound)
-		} else {
-			http.Redirect(w, r, h.Config.SiteURL+"/login?error=auth_failed", http.StatusFound)
-		}
+		http.Redirect(w, r, h.Config.SiteURL+"/login?error=auth_failed", http.StatusFound)
 		return
 	}
 
-	// Step 4: Set cookies
+	// Step 4: Set cookies and generate session
 	h.setForumlineCookies(w, identityToken, localUserID, forumlineAccessToken)
 
-	// Step 5: Generate session
-	if h.isHostedMode() {
-		accessToken, err := h.signHostedSession(localUserID)
-		if err != nil {
-			log.Printf("[Forumline:Auth] signHostedSession failed: %v", err)
-			http.Redirect(w, r, h.Config.SiteURL+"/login?error=auth_failed", http.StatusFound)
-			return
-		}
-		http.Redirect(w, r, fmt.Sprintf("%s/#access_token=%s&type=bearer", h.Config.SiteURL, accessToken), http.StatusFound)
+	accessToken, err := h.signSession(localUserID)
+	if err != nil {
+		log.Printf("[Forumline:Auth] signSession failed: %v", err)
+		http.Redirect(w, r, h.Config.SiteURL+"/login?error=auth_failed", http.StatusFound)
 		return
 	}
-
-	redirectURL := h.afterAuth(localUserID)
-	if redirectURL != "" {
-		http.Redirect(w, r, redirectURL, http.StatusFound)
-		return
-	}
-
-	http.Redirect(w, r, h.Config.SiteURL+"/?forumline_auth=success", http.StatusFound)
+	http.Redirect(w, r, fmt.Sprintf("%s/#access_token=%s&type=bearer", h.Config.SiteURL, accessToken), http.StatusFound)
 }
 
 // redirectToForumlineAuth redirects browser to the forumline OAuth authorize page.
-func (h *Handlers) redirectToForumlineAuth(w http.ResponseWriter, r *http.Request, linkUID string) {
+func (h *Handlers) redirectToForumlineAuth(w http.ResponseWriter, r *http.Request) {
 	state := randomHex(16)
 
 	authURL, _ := url.Parse(h.Config.ForumlineURL + "/api/oauth/authorize")
@@ -235,64 +132,6 @@ func (h *Handlers) redirectToForumlineAuth(w http.ResponseWriter, r *http.Reques
 // HandleForumlineCallback handles GET /api/forumline/auth/callback.
 func (h *Handlers) HandleForumlineCallback(w http.ResponseWriter, r *http.Request) {
 	cookies := parseCookies(r)
-	linkUID := cookies["forumline_link_uid"]
-
-	if linkUID != "" {
-		h.handleLinkCallback(w, r, linkUID)
-		return
-	}
-
-	h.handleNormalCallback(w, r)
-}
-
-// handleLinkCallback handles account linking flow (user clicked "Connect to Forumline" from Settings).
-func (h *Handlers) handleLinkCallback(w http.ResponseWriter, r *http.Request, linkUID string) {
-	cookies := parseCookies(r)
-	code := r.URL.Query().Get("code")
-	state := r.URL.Query().Get("state")
-
-	if code == "" || state == "" {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "Missing code or state parameter"})
-		return
-	}
-	if cookies["forumline_state"] != state {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "State mismatch — possible CSRF attack"})
-		return
-	}
-
-	identity, identityToken, forumlineAccessToken, err := h.exchangeCodeForTokens(code, h.Config.SiteURL+"/api/forumline/auth/callback")
-	if err != nil {
-		log.Printf("[Forumline:Link] Token exchange failed: %v", err)
-		http.Redirect(w, r, h.Config.SiteURL+"/settings?error=link_failed", http.StatusFound)
-		return
-	}
-
-	// Check that forumline_id isn't already linked to a different local account
-	existingID, err := h.Store.GetProfileIDByForumlineID(r.Context(), identity.ForumlineID)
-	if err == nil && existingID != "" && existingID != linkUID {
-		log.Println("[Forumline:Link] forumline_id already linked to another account")
-		http.Redirect(w, r, h.Config.SiteURL+"/settings?error=already_linked", http.StatusFound)
-		return
-	}
-
-	// Link: update the user's profile with the forumline_id
-	if err := h.Store.SetForumlineID(r.Context(), linkUID, identity.ForumlineID); err != nil {
-		log.Printf("[Forumline:Link] Profile update failed: %v", err)
-		http.Redirect(w, r, h.Config.SiteURL+"/settings?error=link_failed", http.StatusFound)
-		return
-	}
-
-	// Set cookies and clear link cookie
-	clearCookie(w, "forumline_state")
-	clearCookie(w, "forumline_link_uid")
-	h.setForumlineCookies(w, identityToken, linkUID, forumlineAccessToken)
-
-	http.Redirect(w, r, h.Config.SiteURL+"/settings?forumline_linked=true", http.StatusFound)
-}
-
-// handleNormalCallback handles the normal OAuth callback (sign-in flow).
-func (h *Handlers) handleNormalCallback(w http.ResponseWriter, r *http.Request) {
-	cookies := parseCookies(r)
 	code := r.URL.Query().Get("code")
 	state := r.URL.Query().Get("state")
 
@@ -312,19 +151,10 @@ func (h *Handlers) handleNormalCallback(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
-	var localUserID string
-	if h.isHostedMode() {
-		localUserID, err = h.createOrLinkUserHosted(r, identity)
-	} else {
-		localUserID, err = h.createOrLinkUser(r, identity, forumlineAccessToken)
-	}
+	localUserID, err := h.createOrLinkUser(r, identity)
 	if err != nil {
 		log.Printf("[Forumline:Callback] createOrLinkUser failed: %v", err)
-		if strings.Contains(err.Error(), "EMAIL_COLLISION") {
-			http.Redirect(w, r, h.Config.SiteURL+"/login?error=email_exists", http.StatusFound)
-		} else {
-			http.Redirect(w, r, h.Config.SiteURL+"/login?error=auth_failed", http.StatusFound)
-		}
+		http.Redirect(w, r, h.Config.SiteURL+"/login?error=auth_failed", http.StatusFound)
 		return
 	}
 
@@ -332,24 +162,13 @@ func (h *Handlers) handleNormalCallback(w http.ResponseWriter, r *http.Request) 
 	clearCookie(w, "forumline_state")
 	h.setForumlineCookies(w, identityToken, localUserID, forumlineAccessToken)
 
-	if h.isHostedMode() {
-		accessToken, err := h.signHostedSession(localUserID)
-		if err != nil {
-			log.Printf("[Forumline:Callback] signHostedSession failed: %v", err)
-			http.Redirect(w, r, h.Config.SiteURL+"/login?error=auth_failed", http.StatusFound)
-			return
-		}
-		http.Redirect(w, r, fmt.Sprintf("%s/#access_token=%s&type=bearer", h.Config.SiteURL, accessToken), http.StatusFound)
+	accessToken, err := h.signSession(localUserID)
+	if err != nil {
+		log.Printf("[Forumline:Callback] signSession failed: %v", err)
+		http.Redirect(w, r, h.Config.SiteURL+"/login?error=auth_failed", http.StatusFound)
 		return
 	}
-
-	redirectURL := h.afterAuth(localUserID)
-	if redirectURL != "" {
-		http.Redirect(w, r, redirectURL, http.StatusFound)
-		return
-	}
-
-	http.Redirect(w, r, h.Config.SiteURL+"/?forumline_auth=success", http.StatusFound)
+	http.Redirect(w, r, fmt.Sprintf("%s/#access_token=%s&type=bearer", h.Config.SiteURL, accessToken), http.StatusFound)
 }
 
 // HandleForumlineToken handles GET /api/forumline/auth/forumline-token.
@@ -393,15 +212,8 @@ func (h *Handlers) HandleForumlineSession(w http.ResponseWriter, r *http.Request
 	h.handleSessionGet(w, r)
 }
 
-// handleDisconnect revokes Forumline session and clears cookies.
+// handleDisconnect clears Forumline session cookies.
 func (h *Handlers) handleDisconnect(w http.ResponseWriter, r *http.Request) {
-	cookies := parseCookies(r)
-	forumlineAccessToken := cookies["forumline_access_token"]
-
-	if forumlineAccessToken != "" && h.Config.ForumlineGoTrueURL != "" {
-		gotrueAdminSignOut(h.Config.ForumlineGoTrueURL, h.Config.ForumlineServiceRoleKey, forumlineAccessToken)
-	}
-
 	for _, name := range []string{"forumline_identity", "forumline_user_id", "forumline_access_token"} {
 		http.SetCookie(w, &http.Cookie{
 			Name: name, Value: "",
@@ -498,86 +310,38 @@ func (h *Handlers) exchangeCodeForTokens(code, redirectURI string) (*model.Forum
 }
 
 // createOrLinkUser creates or links a local user from a Forumline identity.
-func (h *Handlers) createOrLinkUser(r *http.Request, identity *model.ForumlineIdentity, forumlineAccessToken string) (string, error) {
+func (h *Handlers) createOrLinkUser(r *http.Request, identity *model.ForumlineIdentity) (string, error) {
 	ctx := r.Context()
 
-	// 1. Check if a local profile already has this forumline_id
 	existingID, err := h.Store.GetProfileIDByForumlineID(ctx, identity.ForumlineID)
 	if err == nil && existingID != "" {
-		_ = h.Store.UpdateDisplayName(ctx, existingID, identity.DisplayName)
+		_ = h.Store.UpdateDisplayNameAndAvatar(ctx, existingID, identity.DisplayName, identity.AvatarURL)
 		return existingID, nil
 	}
 
-	// 2. Get Forumline email and check for collision
-	var forumlineEmail string
-	if forumlineAccessToken != "" && h.Config.ForumlineGoTrueURL != "" {
-		forumlineEmail, _ = gotrueGetUserByToken(h.Config.ForumlineGoTrueURL, forumlineAccessToken)
+	if err := h.Store.CreateProfileHosted(ctx, identity); err != nil {
+		return "", fmt.Errorf("create profile: %w", err)
+	}
+	return identity.ForumlineID, nil
+}
+
+// signSession creates a JWT session token for a local user.
+func (h *Handlers) signSession(userID string) (string, error) {
+	secret := h.Config.ForumlineJWTSecret
+	if secret == "" {
+		return "", fmt.Errorf("no JWT secret configured")
 	}
 
-	if forumlineEmail != "" {
-		users, err := gotrueAdminListUsers(h.Config.GoTrueURL, h.Config.GoTrueServiceRoleKey)
-		if err == nil {
-			for _, u := range users {
-				if strings.EqualFold(u.Email, forumlineEmail) {
-					if meta, ok := u.UserMetadata["forumline_id"].(string); ok && meta == identity.ForumlineID {
-						_ = h.Store.EnsureProfileWithForumlineID(ctx, u.ID, identity)
-						return u.ID, nil
-					}
-					profileID, err := h.Store.GetProfileIDByForumlineIDUnlinked(ctx, u.ID)
-					if err == nil && profileID != "" {
-						_ = h.Store.EnsureProfileWithForumlineID(ctx, profileID, identity)
-						return profileID, nil
-					}
-					return "", fmt.Errorf("EMAIL_COLLISION: a local account with this email already exists, sign in locally and connect Forumline from Settings")
-				}
-			}
-		}
-
-		newUserID, err := gotrueAdminCreateUser(h.Config.GoTrueURL, h.Config.GoTrueServiceRoleKey, map[string]interface{}{
-			"email":         forumlineEmail,
-			"password":      randomHex(16),
-			"email_confirm": true,
-			"user_metadata": map[string]string{
-				"username":     identity.Username,
-				"display_name": identity.DisplayName,
-				"forumline_id": identity.ForumlineID,
-			},
-		})
-		if err != nil {
-			return "", fmt.Errorf("failed to create local user: %w", err)
-		}
-
-		_ = h.Store.EnsureProfileWithForumlineID(ctx, newUserID, identity)
-		return newUserID, nil
+	now := time.Now()
+	claims := jwt.RegisteredClaims{
+		Subject:   userID,
+		IssuedAt:  jwt.NewNumericDate(now),
+		ExpiresAt: jwt.NewNumericDate(now.Add(24 * time.Hour)),
+		Issuer:    "forumline-forum",
 	}
 
-	// 3. Fallback: check existing GoTrue users for matching forumline_id
-	users, listErr := gotrueAdminListUsers(h.Config.GoTrueURL, h.Config.GoTrueServiceRoleKey)
-	if listErr == nil {
-		for _, u := range users {
-			if meta, ok := u.UserMetadata["forumline_id"].(string); ok && meta == identity.ForumlineID {
-				_ = h.Store.EnsureProfileWithForumlineID(ctx, u.ID, identity)
-				return u.ID, nil
-			}
-		}
-	}
-
-	newUserID, err := gotrueAdminCreateUser(h.Config.GoTrueURL, h.Config.GoTrueServiceRoleKey, map[string]interface{}{
-		"email":         identity.Username + "@forumline.local",
-		"password":      randomHex(16),
-		"email_confirm": true,
-		"user_metadata": map[string]string{
-			"username":     identity.Username,
-			"display_name": identity.DisplayName,
-			"forumline_id": identity.ForumlineID,
-		},
-	})
-	if err != nil {
-		return "", fmt.Errorf("failed to create local user: %w", err)
-	}
-
-	_ = h.Store.EnsureProfileWithForumlineID(ctx, newUserID, identity)
-	return newUserID, nil
+	token := jwt.NewWithClaims(jwt.SigningMethodHS256, claims)
+	return token.SignedString([]byte(secret))
 }
 
 // setForumlineCookies sets the standard set of Forumline httpOnly cookies.
@@ -627,41 +391,3 @@ func nilIfEmpty(s string) interface{} {
 	return s
 }
 
-// --- Hosted mode (no GoTrue) ---
-
-func (h *Handlers) isHostedMode() bool {
-	return h.Config.GoTrueURL == ""
-}
-
-func (h *Handlers) createOrLinkUserHosted(r *http.Request, identity *model.ForumlineIdentity) (string, error) {
-	ctx := r.Context()
-
-	existingID, err := h.Store.GetProfileIDByForumlineID(ctx, identity.ForumlineID)
-	if err == nil && existingID != "" {
-		_ = h.Store.UpdateDisplayNameAndAvatar(ctx, existingID, identity.DisplayName, identity.AvatarURL)
-		return existingID, nil
-	}
-
-	if err := h.Store.CreateProfileHosted(ctx, identity); err != nil {
-		return "", fmt.Errorf("create profile: %w", err)
-	}
-	return identity.ForumlineID, nil
-}
-
-func (h *Handlers) signHostedSession(userID string) (string, error) {
-	secret := h.Config.ForumlineJWTSecret
-	if secret == "" {
-		return "", fmt.Errorf("no JWT secret configured")
-	}
-
-	now := time.Now()
-	claims := jwt.RegisteredClaims{
-		Subject:   userID,
-		IssuedAt:  jwt.NewNumericDate(now),
-		ExpiresAt: jwt.NewNumericDate(now.Add(24 * time.Hour)),
-		Issuer:    "forumline-hosted",
-	}
-
-	token := jwt.NewWithClaims(jwt.SigningMethodHS256, claims)
-	return token.SignedString([]byte(secret))
-}

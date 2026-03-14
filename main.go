@@ -19,6 +19,16 @@ func main() {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
+	// Auth uses FORUMLINE_JWT_SECRET for all JWT validation.
+	// Set JWT_SECRET to match so shared.ValidateJWT works transparently.
+	if jwtSecret := os.Getenv("FORUMLINE_JWT_SECRET"); jwtSecret != "" {
+		if os.Getenv("JWT_SECRET") == "" {
+			if err := os.Setenv("JWT_SECRET", jwtSecret); err != nil {
+				log.Fatalf("failed to set JWT_SECRET: %v", err)
+			}
+		}
+	}
+
 	// Database
 	pool, err := shared.NewDBPool(ctx)
 	if err != nil {
@@ -52,26 +62,22 @@ func main() {
 	}
 
 	cfg := &forum.Config{
-		GoTrueURL:         os.Getenv("GOTRUE_URL"),
-		GoTrueServiceRoleKey:    os.Getenv("GOTRUE_SERVICE_ROLE_KEY"),
-		SiteURL:           siteURL,
-		Domain:            domain,
-		ForumName:         os.Getenv("FORUM_NAME"),
-		IconURL:           os.Getenv("FORUM_ICON_URL"),
-		ForumlineURL:            os.Getenv("FORUMLINE_APP_URL"),
-		ForumlineClientID:       os.Getenv("FORUMLINE_CLIENT_ID"),
-		ForumlineClientSecret:   os.Getenv("FORUMLINE_CLIENT_SECRET"),
-		ForumlineJWTSecret:      os.Getenv("FORUMLINE_JWT_SECRET"),
-		ForumlineGoTrueURL:    os.Getenv("FORUMLINE_GOTRUE_URL"),
-		ForumlineServiceRoleKey: os.Getenv("FORUMLINE_SERVICE_ROLE_KEY"),
-		LiveKitURL:        os.Getenv("LIVEKIT_URL"),
-		LiveKitAPIKey:     os.Getenv("LIVEKIT_API_KEY"),
-		LiveKitAPISecret:  os.Getenv("LIVEKIT_API_SECRET"),
-		R2AccountID:       os.Getenv("R2_ACCOUNT_ID"),
-		R2AccessKeyID:     os.Getenv("R2_ACCESS_KEY_ID"),
-		R2SecretAccessKey: os.Getenv("R2_SECRET_ACCESS_KEY"),
-		R2BucketName:      os.Getenv("R2_BUCKET_NAME"),
-		R2PublicURL:       os.Getenv("R2_PUBLIC_URL"),
+		SiteURL:               siteURL,
+		Domain:                domain,
+		ForumName:             os.Getenv("FORUM_NAME"),
+		IconURL:               os.Getenv("FORUM_ICON_URL"),
+		ForumlineURL:          os.Getenv("FORUMLINE_APP_URL"),
+		ForumlineClientID:     os.Getenv("FORUMLINE_CLIENT_ID"),
+		ForumlineClientSecret: os.Getenv("FORUMLINE_CLIENT_SECRET"),
+		ForumlineJWTSecret:    os.Getenv("FORUMLINE_JWT_SECRET"),
+		LiveKitURL:            os.Getenv("LIVEKIT_URL"),
+		LiveKitAPIKey:         os.Getenv("LIVEKIT_API_KEY"),
+		LiveKitAPISecret:      os.Getenv("LIVEKIT_API_SECRET"),
+		R2AccountID:           os.Getenv("R2_ACCOUNT_ID"),
+		R2AccessKeyID:         os.Getenv("R2_ACCESS_KEY_ID"),
+		R2SecretAccessKey:     os.Getenv("R2_SECRET_ACCESS_KEY"),
+		R2BucketName:          os.Getenv("R2_BUCKET_NAME"),
+		R2PublicURL:           os.Getenv("R2_PUBLIC_URL"),
 	}
 
 	// Router
@@ -124,8 +130,8 @@ func spaHandler(apiHandler http.Handler) http.Handler {
 	fileServer := http.FileServer(http.Dir(distDir))
 
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		// API and auth proxy routes go to the router
-		if strings.HasPrefix(r.URL.Path, "/api/") || strings.HasPrefix(r.URL.Path, "/auth/") || strings.HasPrefix(r.URL.Path, "/.well-known/") {
+		// API routes go to the router
+		if strings.HasPrefix(r.URL.Path, "/api/") || strings.HasPrefix(r.URL.Path, "/.well-known/") {
 			apiHandler.ServeHTTP(w, r)
 			return
 		}

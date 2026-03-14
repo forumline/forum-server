@@ -15,7 +15,7 @@ func (h *Handlers) HandleConfig(w http.ResponseWriter, r *http.Request) {
 	}
 	resp := map[string]interface{}{
 		"name":        name,
-		"hosted_mode": h.Config.GoTrueURL == "",
+		"hosted_mode": true,
 		"icon_url":    h.Config.IconURL,
 	}
 	if h.Config.LiveKitURL != "" {

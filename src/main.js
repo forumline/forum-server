@@ -10,8 +10,6 @@ import { loadConfig, getConfig } from './lib/config.js'
 import { renderHome } from './pages/home.js'
 import { renderLogin } from './pages/login.js'
 import { renderRegister } from './pages/register.js'
-import { renderForgotPassword } from './pages/forgot-password.js'
-import { renderResetPassword } from './pages/reset-password.js'
 import { renderCategory } from './pages/category.js'
 import { renderThread } from './pages/thread.js'
 import { renderNewThread } from './pages/new-thread.js'
@@ -67,8 +65,6 @@ function redirectIfAuth(renderFn) {
 route('/', page(renderHome))
 route('/login', redirectIfAuth(renderLogin))
 route('/register', redirectIfAuth(renderRegister))
-route('/forgot-password', redirectIfAuth(renderForgotPassword))
-route('/reset-password', page(renderResetPassword))
 route('/c/:categorySlug', page(renderCategory))
 route('/c/:categorySlug/new', requireAuth(renderNewThread))
 route('/t/:threadId', page(renderThread))

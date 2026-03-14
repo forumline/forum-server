@@ -1,13 +1,12 @@
 /*
  * User Authentication
  *
- * Manages the full user authentication lifecycle so members can sign in, sign up, and maintain sessions across visits.
+ * Manages the user authentication lifecycle via Forumline identity.
+ * All authentication goes through Forumline OAuth — no local email/password.
  *
  * It must:
- * - Support both local GoTrue auth (email/password) and federated Forumline identity login for hosted forums
- * - Persist sessions in localStorage and automatically refresh tokens before they expire
- * - Create a user profile with a generated default avatar on first sign-up
- * - Handle password reset flows initiated via email recovery links
+ * - Persist sessions in localStorage
+ * - Create a user profile with a generated default avatar on first sign-in
  * - Expose the current user and profile to the rest of the app via a reactive auth store
  */
 
@@ -15,8 +14,7 @@ import { createStore } from '../state.js'
 import { api } from './api.js'
 import { uploadDefaultAvatar } from './avatars.js'
 
-const STORAGE_KEY = 'gotrue-session'
-const anonKey = import.meta.env.VITE_AUTH_ANON_KEY || ''
+const STORAGE_KEY = 'forumline-session'
 
 // Auth state store
 export const authStore = createStore({
@@ -26,62 +24,37 @@ export const authStore = createStore({
 })
 
 let currentSession = null
-let refreshTimer = null
-// --- Internal helpers ---
+let expiryTimer = null
 
-function gotrueHeaders(token) {
-  const h = { 'Content-Type': 'application/json', 'apikey': anonKey }
-  if (token) h['Authorization'] = `Bearer ${token}`
-  return h
-}
+// --- Internal helpers ---
 
 function saveSession(session) {
   currentSession = session
   if (session) {
     localStorage.setItem(STORAGE_KEY, JSON.stringify(session))
-    scheduleRefresh(session)
+    scheduleExpiryCheck(session)
   } else {
     localStorage.removeItem(STORAGE_KEY)
-    if (refreshTimer) {
-      clearTimeout(refreshTimer)
-      refreshTimer = null
+    // Also clear legacy storage key
+    localStorage.removeItem('gotrue-session')
+    if (expiryTimer) {
+      clearTimeout(expiryTimer)
+      expiryTimer = null
     }
   }
 }
 
-function scheduleRefresh(session) {
-  if (refreshTimer) clearTimeout(refreshTimer)
+function scheduleExpiryCheck(session) {
+  if (expiryTimer) clearTimeout(expiryTimer)
   const expiresAt = session.expires_at * 1000
-  const refreshIn = Math.max(expiresAt - Date.now() - 60000, 5000)
-  refreshTimer = setTimeout(refreshSession, refreshIn)
-}
-
-async function refreshSession() {
-  if (!currentSession?.refresh_token) {
-    // Hosted mode sessions can't refresh — sign out when expired
-    if (currentSession?.hosted && currentSession?.expires_at * 1000 < Date.now()) {
+  const checkIn = Math.max(expiresAt - Date.now() - 60000, 5000)
+  expiryTimer = setTimeout(() => {
+    // Session expired — sign out
+    if (currentSession?.expires_at * 1000 < Date.now()) {
       saveSession(null)
       authStore.set({ user: null, profile: null, loading: false })
     }
-    return false
-  }
-  try {
-    const res = await fetch('/auth/v1/token?grant_type=refresh_token', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json', 'apikey': anonKey },
-      body: JSON.stringify({ refresh_token: currentSession.refresh_token }),
-    })
-    if (!res.ok) {
-      saveSession(null)
-      authStore.set({ user: null, profile: null, loading: false })
-      return false
-    }
-    const session = await res.json()
-    saveSession(session)
-    return true
-  } catch {
-    return false
-  }
+  }, checkIn)
 }
 
 async function fetchProfile(userId) {
@@ -97,7 +70,6 @@ async function ensureProfile(rawUser) {
 
   // Create profile
   const username = rawUser.user_metadata?.username
-    || rawUser.email?.split('@')[0]
     || `user_${rawUser.id.slice(0, 8)}`
   const displayName = rawUser.user_metadata?.display_name || username
 
@@ -139,119 +111,17 @@ function toAppUser(rawUser, prof) {
 export async function getAccessToken() {
   if (!currentSession) return null
   if (currentSession.expires_at * 1000 < Date.now()) {
-    const ok = await refreshSession()
-    if (!ok) return null
+    // Session expired, no refresh available — sign out
+    saveSession(null)
+    authStore.set({ user: null, profile: null, loading: false })
+    return null
   }
   return currentSession.access_token
 }
 
-export async function signIn(email, password) {
-  try {
-    const res = await fetch('/auth/v1/token?grant_type=password', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json', 'apikey': anonKey },
-      body: JSON.stringify({ email, password }),
-    })
-    if (!res.ok) {
-      const body = await res.json().catch(() => ({}))
-      return { error: new Error(body.error_description || body.msg || 'Login failed') }
-    }
-    const session = await res.json()
-    saveSession(session)
-
-    const prof = await ensureProfile(session.user)
-    authStore.set({ user: toAppUser(session.user, prof), loading: false })
-    return { error: null }
-  } catch (err) {
-    return { error: err instanceof Error ? err : new Error('Login failed') }
-  }
-}
-
-export async function signUp(email, password, username) {
-  try {
-    const res = await fetch('/api/auth/signup', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ email, password, username }),
-    })
-    const body = await res.json()
-    if (!res.ok) {
-      return { error: new Error(body.error || 'Signup failed') }
-    }
-
-    if (body.session?.access_token && body.session?.refresh_token) {
-      const userRes = await fetch('/auth/v1/user', {
-        headers: { 'Authorization': `Bearer ${body.session.access_token}`, 'apikey': anonKey },
-      })
-      const user = userRes.ok ? await userRes.json() : { id: body.user?.id || '', email }
-      const session = {
-        access_token: body.session.access_token,
-        refresh_token: body.session.refresh_token,
-        expires_in: body.session.expires_in || 3600,
-        expires_at: body.session.expires_at || Math.floor(Date.now() / 1000) + 3600,
-        user,
-      }
-      saveSession(session)
-
-      const prof = await ensureProfile(user)
-      authStore.set({ user: toAppUser(user, prof), loading: false })
-    }
-    return { error: null }
-  } catch (err) {
-    return { error: err instanceof Error ? err : new Error('Signup failed') }
-  }
-}
-
 export async function signOut() {
-  try {
-    if (currentSession?.access_token && !currentSession?.hosted) {
-      await fetch('/auth/v1/logout', {
-        method: 'POST',
-        headers: gotrueHeaders(currentSession.access_token),
-      })
-    }
-  } catch {}
   saveSession(null)
   authStore.set({ user: null, profile: null, loading: false })
-}
-
-export async function resetPassword(email) {
-  try {
-    const res = await fetch('/auth/v1/recover', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json', 'apikey': anonKey },
-      body: JSON.stringify({ email, gotrue_meta_security: { captcha_token: '' } }),
-    })
-    if (!res.ok) {
-      const body = await res.json().catch(() => ({}))
-      return { error: new Error(body.msg || 'Password reset failed') }
-    }
-    return { error: null }
-  } catch (err) {
-    return { error: err instanceof Error ? err : new Error('Password reset failed') }
-  }
-}
-
-export async function updatePassword(newPassword) {
-  try {
-    const res = await fetch('/auth/v1/user', {
-      method: 'PUT',
-      headers: gotrueHeaders(currentSession?.access_token),
-      body: JSON.stringify({ password: newPassword }),
-    })
-    if (!res.ok) {
-      const body = await res.json().catch(() => ({}))
-      return { error: new Error(body.msg || 'Password update failed') }
-    }
-    const user = await res.json()
-    if (currentSession) {
-      currentSession.user = user
-      saveSession(currentSession)
-    }
-    return { error: null }
-  } catch (err) {
-    return { error: err instanceof Error ? err : new Error('Password update failed') }
-  }
 }
 
 async function restoreSessionFromUrl() {
@@ -263,46 +133,16 @@ async function restoreSessionFromUrl() {
 
   try {
     const payload = JSON.parse(atob(accessToken.split('.')[1]))
-    const refreshToken = params.get('refresh_token')
-
-    // Hosted mode: no refresh_token, no GoTrue — decode JWT and fetch profile
-    if (!refreshToken) {
-      const userId = payload.sub
-      if (!userId) return false
-
-      const session = {
-        access_token: accessToken,
-        refresh_token: null,
-        expires_in: (payload.exp - payload.iat) || 86400,
-        expires_at: payload.exp || Math.floor(Date.now() / 1000) + 86400,
-        user: { id: userId },
-        hosted: true,
-      }
-      saveSession(session)
-      window.history.replaceState({}, '', window.location.pathname)
-      return true
-    }
-
-    // Self-hosted mode: use GoTrue to get full user data
-    const userRes = await fetch('/auth/v1/user', {
-      headers: { 'Authorization': `Bearer ${accessToken}`, 'apikey': anonKey },
-    })
-    if (!userRes.ok) return false
-    const user = await userRes.json()
+    const userId = payload.sub
+    if (!userId) return false
 
     const session = {
       access_token: accessToken,
-      refresh_token: refreshToken,
-      expires_in: (payload.exp - payload.iat) || 3600,
-      expires_at: payload.exp || Math.floor(Date.now() / 1000) + 3600,
-      user,
+      expires_in: (payload.exp - payload.iat) || 86400,
+      expires_at: payload.exp || Math.floor(Date.now() / 1000) + 86400,
+      user: { id: userId },
     }
     saveSession(session)
-
-    if (params.get('type') === 'recovery') {
-      window.location.href = '/reset-password'
-    }
-
     window.history.replaceState({}, '', window.location.pathname)
     return true
   } catch {
@@ -313,18 +153,26 @@ async function restoreSessionFromUrl() {
 // --- Init ---
 
 export async function initAuth() {
-  // Restore from localStorage
-  const stored = localStorage.getItem(STORAGE_KEY)
+  // Restore from localStorage (check both new and legacy keys)
+  const stored = localStorage.getItem(STORAGE_KEY) || localStorage.getItem('gotrue-session')
   if (stored) {
     try {
-      currentSession = JSON.parse(stored)
+      const session = JSON.parse(stored)
+      // Migrate legacy sessions: if it has a refresh_token (GoTrue), discard it
+      if (session.refresh_token) {
+        localStorage.removeItem('gotrue-session')
+        localStorage.removeItem(STORAGE_KEY)
+      } else {
+        currentSession = session
+      }
     } catch {
       localStorage.removeItem(STORAGE_KEY)
+      localStorage.removeItem('gotrue-session')
     }
   }
-  if (currentSession) scheduleRefresh(currentSession)
+  if (currentSession) scheduleExpiryCheck(currentSession)
 
-  // Check URL hash for OAuth/recovery tokens
+  // Check URL hash for OAuth tokens
   await restoreSessionFromUrl()
 
   // Strip ?forumline_auth=success

@@ -1,4 +1,4 @@
-import { authStore, getAccessToken, updatePassword } from '../lib/auth.js'
+import { authStore, getAccessToken } from '../lib/auth.js'
 import { api } from '../lib/api.js'
 import { uploadAvatar } from '../lib/avatars.js'
 import { toast } from '../lib/toast.js'
@@ -118,68 +118,14 @@ export function renderSettings(container) {
   }
 
   function renderAccountTab(el) {
-    // eslint-disable-next-line no-unsanitized/property -- static template
     el.innerHTML = `
       <div class="space-y-6 max-w-lg">
         <div>
-          <h3 class="font-semibold mb-3">Change Password</h3>
-          <div class="space-y-3">
-            <input type="password" id="new-password" placeholder="New password" class="w-full px-3 py-2 bg-slate-800 border border-slate-700 rounded-lg text-white focus:outline-none focus:ring-2 focus:ring-indigo-500" />
-            <input type="password" id="confirm-password" placeholder="Confirm password" class="w-full px-3 py-2 bg-slate-800 border border-slate-700 rounded-lg text-white focus:outline-none focus:ring-2 focus:ring-indigo-500" />
-            <div id="password-error" class="hidden text-sm text-red-400"></div>
-            <button id="change-password" class="px-6 py-2 bg-indigo-600 hover:bg-indigo-500 text-white rounded-lg font-medium transition-colors">Update Password</button>
-          </div>
-        </div>
-
-        <div class="border-t border-slate-700 pt-6">
-          <h3 class="font-semibold mb-3">Forumline Connection</h3>
-          ${profile?.forumline_id ? `
-            <div class="flex items-center gap-2 text-sm">
-              <span class="text-green-400">Connected</span>
-              <button id="disconnect-forumline" class="text-red-400 hover:text-red-300 text-sm">Disconnect</button>
-            </div>
-          ` : `
-            <a href="/api/forumline/auth" class="inline-block px-4 py-2 bg-slate-800 border border-slate-600 hover:bg-slate-700 text-white rounded-lg text-sm transition-colors">Connect Forumline Account</a>
-          `}
+          <h3 class="font-semibold mb-3">Forumline Identity</h3>
+          <p class="text-sm text-slate-400">Your account is managed through Forumline. Visit <a href="https://app.forumline.net" class="text-indigo-400 hover:text-indigo-300" target="_blank">app.forumline.net</a> to manage your identity.</p>
         </div>
       </div>
     `
-
-    el.querySelector('#change-password')?.addEventListener('click', async () => {
-      const newPw = el.querySelector('#new-password').value
-      const confirmPw = el.querySelector('#confirm-password').value
-      const errorEl = el.querySelector('#password-error')
-
-      if (newPw !== confirmPw) {
-        errorEl.textContent = 'Passwords do not match'
-        errorEl.classList.remove('hidden')
-        return
-      }
-      if (newPw.length < 6) {
-        errorEl.textContent = 'Password must be at least 6 characters'
-        errorEl.classList.remove('hidden')
-        return
-      }
-
-      const { error } = await updatePassword(newPw)
-      if (error) {
-        errorEl.textContent = error.message
-        errorEl.classList.remove('hidden')
-      } else {
-        toast.success('Password updated')
-        el.querySelector('#new-password').value = ''
-        el.querySelector('#confirm-password').value = ''
-        errorEl.classList.add('hidden')
-      }
-    })
-
-    el.querySelector('#disconnect-forumline')?.addEventListener('click', async () => {
-      try {
-        await fetch(`/api/profiles/${user.id}/forumline-id`, { method: 'DELETE', headers: { 'Authorization': `Bearer ${await getAccessToken()}` } })
-        toast.success('Forumline disconnected')
-        render()
-      } catch { toast.error('Failed to disconnect') }
-    })
   }
 
   function renderNotificationsTab(el) {

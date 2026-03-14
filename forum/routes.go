@@ -1,11 +1,6 @@
 package forum
 
 import (
-	"net/http"
-	"net/http/httputil"
-	"net/url"
-	"time"
-
 	"github.com/go-chi/chi/v5"
 
 	"github.com/forumline/forum-server/forum/service"
@@ -42,9 +37,6 @@ func NewRouter(pool shared.DB, sseHub *shared.SSEHub, cfg *Config) *chi.Mux {
 		NotificationSvc: notifSvc,
 	}
 
-	// Rate limiters
-	signupRL := shared.RateLimitMiddleware(shared.NewRateLimiter(5, time.Minute))
-
 	// Channel follows (authenticated)
 	r.Group(func(r chi.Router) {
 		r.Use(shared.AuthMiddleware)
@@ -59,9 +51,6 @@ func NewRouter(pool shared.DB, sseHub *shared.SSEHub, cfg *Config) *chi.Mux {
 		r.Get("/api/notification-preferences", h.HandleNotificationPreferences)
 		r.Put("/api/notification-preferences", h.HandleNotificationPreferences)
 	})
-
-	// Auth
-	r.With(signupRL).Post("/api/auth/signup", h.HandleSignup)
 
 	// Forumline OAuth
 	r.Get("/api/forumline/auth", h.HandleForumlineAuth)
@@ -169,17 +158,6 @@ func NewRouter(pool shared.DB, sseHub *shared.SSEHub, cfg *Config) *chi.Mux {
 
 	// Forumline manifest (discovery)
 	r.Get("/.well-known/forumline-manifest.json", h.HandleManifest)
-
-	// GoTrue reverse proxy — allows frontend to call /auth/v1/* same-origin
-	if cfg.GoTrueURL != "" {
-		target, _ := url.Parse(cfg.GoTrueURL)
-		proxy := httputil.NewSingleHostReverseProxy(target)
-		r.HandleFunc("/auth/v1/*", func(w http.ResponseWriter, r *http.Request) {
-			r.URL.Path = r.URL.Path[len("/auth/v1"):]
-			r.Host = target.Host
-			proxy.ServeHTTP(w, r)
-		})
-	}
 
 	return r
 }

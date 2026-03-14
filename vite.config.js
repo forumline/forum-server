@@ -26,11 +26,6 @@ export default defineConfig({
           })
         },
       },
-      '/auth': {
-        target: apiTarget,
-        changeOrigin: true,
-        secure: apiTarget.startsWith('https'),
-      },
     },
   },
 })
