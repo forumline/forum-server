@@ -343,7 +343,7 @@ func (h *Handlers) pushToForumline(items []forumlinePushItem) {
 	_ = resp.Body.Close()
 
 	if resp.StatusCode >= 300 {
-		log.Printf("[notifications] forumline webhook returned HTTP %d", resp.StatusCode)
+		log.Printf("[notifications] forumline webhook returned HTTP %d (url: %s)", resp.StatusCode, endpoint)
 	}
 }
 
