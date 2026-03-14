@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"io"
 	"log"
 	"net/http"
 	"net/url"
@@ -122,6 +123,13 @@ func (h *Handlers) setLinkCookiesAndRedirect(w http.ResponseWriter, r *http.Requ
 // handleServerSideAuth does the entire OAuth exchange server-side (for iframe usage).
 func (h *Handlers) handleServerSideAuth(w http.ResponseWriter, r *http.Request, forumlineToken string) {
 	log.Println("[Forumline:Auth] Starting server-side auth with forumline_token")
+
+	if h.Config.ForumlineClientID == "" {
+		log.Println("[Forumline:Auth] No OAuth client_id configured for this forum")
+		http.Redirect(w, r, h.Config.SiteURL+"/login?error=auth_failed", http.StatusFound)
+		return
+	}
+
 	state := randomHex(16)
 	redirectURI := h.Config.SiteURL + "/api/forumline/auth/callback"
 
@@ -150,7 +158,8 @@ func (h *Handlers) handleServerSideAuth(w http.ResponseWriter, r *http.Request, 
 
 	location := resp.Header.Get("Location")
 	if location == "" {
-		log.Printf("[Forumline:Auth] No redirect from Forumline authorize. Status: %d", resp.StatusCode)
+		respBody, _ := io.ReadAll(io.LimitReader(resp.Body, 512))
+		log.Printf("[Forumline:Auth] No redirect from Forumline authorize. Status: %d, Body: %s", resp.StatusCode, string(respBody))
 		http.Redirect(w, r, h.Config.SiteURL+"/login?error=auth_failed", http.StatusFound)
 		return
 	}
