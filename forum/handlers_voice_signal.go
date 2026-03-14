@@ -9,7 +9,7 @@ import (
 	shared "github.com/forumline/forumline/shared-go"
 )
 
-// HandleVoiceSignal handles POST /api/voice/signal — relays WebRTC signaling
+// HandleVoiceSignal handles POST /api/voice-signal — relays WebRTC signaling
 // (SDP offers/answers and ICE candidates) between peers via Postgres NOTIFY.
 func (h *Handlers) HandleVoiceSignal(w http.ResponseWriter, r *http.Request) {
 	senderID := shared.UserIDFromContext(r.Context())
@@ -47,13 +47,13 @@ func (h *Handlers) HandleVoiceSignal(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]bool{"ok": true})
 }
 
-// HandleVoiceSignalStream handles GET /api/voice/signal/stream (SSE).
+// HandleVoiceSignalStream handles GET /api/voice-signal/stream (SSE).
 // Streams WebRTC signals targeted at the authenticated user.
 func (h *Handlers) HandleVoiceSignalStream(w http.ResponseWriter, r *http.Request) {
 	userID := shared.UserIDFromContext(r.Context())
 
 	client := &shared.SSEClient{
-		Channel: "voice_signal",
+		Channel: "voice_signal_changes",
 		Filter:  map[string]string{"target_user_id": userID},
 		Send:    make(chan []byte, 32),
 		Done:    make(chan struct{}),

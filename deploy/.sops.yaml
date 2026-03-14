@@ -1,8 +1,0 @@
-creation_rules:
-  - path_regex: \.env\.enc$
-    age: >-
-      age1madhmfcz8vk3q6qfkf76lsaku0m3pca2vqjrqr2xra6ddvjpxypqs23slg
-
-# Note: .env.enc files use dotenv format. Always pass --input-type dotenv
-# --output-type dotenv when running sops encrypt/decrypt commands.
-# Example: sops -d --input-type dotenv --output-type dotenv deploy/.env.enc

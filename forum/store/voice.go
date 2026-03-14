@@ -96,6 +96,6 @@ func (s *Store) SendVoiceSignal(ctx context.Context, signal map[string]interface
 		return err
 	}
 	_, err = s.DB.Exec(ctx,
-		"SELECT pg_notify('voice_signal', $1)", string(signalJSON))
+		"SELECT pg_notify('voice_signal_changes', $1)", string(signalJSON))
 	return err
 }

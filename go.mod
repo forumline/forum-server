@@ -3,7 +3,7 @@ module github.com/forumline/forum-server
 go 1.26.1
 
 require (
-	github.com/forumline/forumline/shared-go v0.0.0-00010101000000-000000000000
+	github.com/forumline/forumline/shared-go v0.1.0
 	github.com/go-chi/chi/v5 v5.2.5
 	github.com/golang-jwt/jwt/v5 v5.3.1
 	github.com/livekit/protocol v1.45.0
@@ -97,5 +97,3 @@ require (
 	google.golang.org/protobuf v1.36.11 // indirect
 	gopkg.in/yaml.v3 v3.0.1 // indirect
 )
-
-replace github.com/forumline/forumline/shared-go => ../../packages/shared-go
