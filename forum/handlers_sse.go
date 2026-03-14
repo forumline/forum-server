@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/go-chi/chi/v5"
+	"github.com/forumline/forum-server/forum/store"
 	shared "github.com/forumline/forumline/shared-go"
 )
 
@@ -16,9 +17,7 @@ func (h *Handlers) HandleChatStream(w http.ResponseWriter, r *http.Request) {
 	slug := chi.URLParam(r, "slug")
 
 	// Look up channel_id for filtering
-	var channelID string
-	err := h.Pool.QueryRow(r.Context(),
-		`SELECT id FROM chat_channels WHERE slug = $1`, slug).Scan(&channelID)
+	channelID, err := h.Store.GetChannelIDBySlug(r.Context(), slug)
 	if err != nil {
 		writeJSON(w, http.StatusNotFound, map[string]string{"error": "channel not found"})
 		return
@@ -76,9 +75,9 @@ func (h *Handlers) HandleChatStream(w http.ResponseWriter, r *http.Request) {
 
 			authorID, _ := raw["author_id"].(string)
 			if authorID != "" {
-				row := h.Pool.QueryRow(ctx,
-					`SELECT `+profileColumns+` FROM profiles WHERE id = $1`, authorID)
-				p, err := scanProfile(row.Scan)
+				row := h.Store.DB.QueryRow(ctx,
+					`SELECT `+store.ProfileColumns()+` FROM profiles WHERE id = $1`, authorID)
+				p, err := store.ScanProfile(row.Scan)
 				if err == nil {
 					raw["author"] = p
 				}
@@ -149,9 +148,9 @@ func (h *Handlers) HandlePostStream(w http.ResponseWriter, r *http.Request) {
 
 			authorID, _ := raw["author_id"].(string)
 			if authorID != "" {
-				row := h.Pool.QueryRow(ctx,
-					`SELECT `+profileColumns+` FROM profiles WHERE id = $1`, authorID)
-				p, err := scanProfile(row.Scan)
+				row := h.Store.DB.QueryRow(ctx,
+					`SELECT `+store.ProfileColumns()+` FROM profiles WHERE id = $1`, authorID)
+				p, err := store.ScanProfile(row.Scan)
 				if err == nil {
 					raw["author"] = p
 				}
@@ -221,9 +220,9 @@ func (h *Handlers) HandleVoicePresenceStream(w http.ResponseWriter, r *http.Requ
 
 			userID, _ := raw["user_id"].(string)
 			if userID != "" {
-				row := h.Pool.QueryRow(ctx,
-					`SELECT `+profileColumns+` FROM profiles WHERE id = $1`, userID)
-				p, err := scanProfile(row.Scan)
+				row := h.Store.DB.QueryRow(ctx,
+					`SELECT `+store.ProfileColumns()+` FROM profiles WHERE id = $1`, userID)
+				p, err := store.ScanProfile(row.Scan)
 				if err == nil {
 					raw["profile"] = p
 				}

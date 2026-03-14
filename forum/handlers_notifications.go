@@ -23,51 +23,10 @@ func (h *Handlers) HandleNotifications(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	rows, err := h.Pool.Query(r.Context(),
-		`SELECT id, type, title, message, link, read, created_at
-		 FROM notifications
-		 WHERE user_id = $1
-		 ORDER BY created_at DESC
-		 LIMIT 50`, userID)
+	notifications, err := h.Store.ListForumlineNotifications(r.Context(), userID, 50, h.Config.Domain)
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
 		return
-	}
-	defer rows.Close()
-
-	type notification struct {
-		ID          string `json:"id"`
-		Type        string `json:"type"`
-		Title       string `json:"title"`
-		Body        string `json:"body"`
-		Link        string `json:"link"`
-		Read        bool   `json:"read"`
-		Timestamp   string `json:"timestamp"`
-		ForumDomain string `json:"forum_domain"`
-	}
-
-	var notifications []notification
-	for rows.Next() {
-		var n notification
-		var message string
-		var link *string
-		var createdAt time.Time
-		if err := rows.Scan(&n.ID, &n.Type, &n.Title, &message, &link, &n.Read, &createdAt); err != nil {
-			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
-			return
-		}
-		n.Body = message
-		if link != nil {
-			n.Link = *link
-		} else {
-			n.Link = "/"
-		}
-		n.Timestamp = createdAt.Format(time.RFC3339)
-		n.ForumDomain = h.Config.Domain
-		notifications = append(notifications, n)
-	}
-	if notifications == nil {
-		notifications = []notification{}
 	}
 	writeJSON(w, http.StatusOK, notifications)
 }
@@ -93,10 +52,7 @@ func (h *Handlers) HandleNotificationRead(w http.ResponseWriter, r *http.Request
 		return
 	}
 
-	_, err = h.Pool.Exec(r.Context(),
-		"UPDATE notifications SET read = true WHERE id = $1 AND user_id = $2",
-		body.ID, userID)
-	if err != nil {
+	if err := h.Store.MarkNotificationRead(r.Context(), body.ID, userID); err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
 		return
 	}
@@ -116,21 +72,7 @@ func (h *Handlers) HandleUnread(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	var notifCount int
-	err = h.Pool.QueryRow(r.Context(),
-		`SELECT COUNT(*) FROM notifications
-		 WHERE user_id = $1 AND read = false AND type != 'chat_mention'`,
-		userID).Scan(&notifCount)
-	if err != nil {
-		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
-		return
-	}
-
-	var chatMentionCount int
-	err = h.Pool.QueryRow(r.Context(),
-		`SELECT COUNT(*) FROM notifications
-		 WHERE user_id = $1 AND read = false AND type = 'chat_mention'`,
-		userID).Scan(&chatMentionCount)
+	notifCount, chatMentionCount, err := h.Store.CountUnread(r.Context(), userID)
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
 		return
@@ -200,8 +142,6 @@ func (h *Handlers) HandleNotificationStream(w http.ResponseWriter, r *http.Reque
 			}
 			flusher.Flush()
 		case data := <-client.Send:
-			// The pg_notify payload is raw JSON with notification fields.
-			// Transform it to match the expected SSE format.
 			var raw map[string]interface{}
 			if err := json.Unmarshal(data, &raw); err == nil {
 				event := map[string]interface{}{
@@ -232,12 +172,9 @@ func (h *Handlers) HandleNotificationStream(w http.ResponseWriter, r *http.Reque
 }
 
 // authenticateFromHeader extracts and validates the JWT from the Authorization header.
-// Tries the forum's JWT_SECRET first, then falls back to ForumlineJWTSecret so
-// the forumline-api can call notification endpoints on behalf of users.
 func (h *Handlers) authenticateFromHeader(r *http.Request) (string, error) {
 	auth := r.Header.Get("Authorization")
 	if auth == "" {
-		// Try query param (for EventSource/SSE)
 		token := r.URL.Query().Get("access_token")
 		if token != "" {
 			return h.validateTokenWithFallback(token)

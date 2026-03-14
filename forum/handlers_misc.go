@@ -3,7 +3,6 @@ package forum
 import (
 	"encoding/json"
 	"net/http"
-	"time"
 
 	shared "github.com/forumline/forumline/shared-go"
 )
@@ -48,25 +47,10 @@ func (h *Handlers) HandleChannelFollows(w http.ResponseWriter, r *http.Request) 
 
 	switch r.Method {
 	case http.MethodGet:
-		rows, err := h.Pool.Query(r.Context(),
-			"SELECT category_id FROM channel_follows WHERE user_id = $1", userID)
+		ids, err := h.Store.ListChannelFollows(r.Context(), userID)
 		if err != nil {
 			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
 			return
-		}
-		defer rows.Close()
-
-		var ids []string
-		for rows.Next() {
-			var id string
-			if err := rows.Scan(&id); err != nil {
-				writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
-				return
-			}
-			ids = append(ids, id)
-		}
-		if ids == nil {
-			ids = []string{}
 		}
 		writeJSON(w, http.StatusOK, ids)
 
@@ -78,13 +62,7 @@ func (h *Handlers) HandleChannelFollows(w http.ResponseWriter, r *http.Request) 
 			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "Missing category_id"})
 			return
 		}
-
-		_, err := h.Pool.Exec(r.Context(),
-			`INSERT INTO channel_follows (user_id, category_id)
-			 VALUES ($1, $2)
-			 ON CONFLICT (user_id, category_id) DO NOTHING`,
-			userID, body.CategoryID)
-		if err != nil {
+		if err := h.Store.AddChannelFollow(r.Context(), userID, body.CategoryID); err != nil {
 			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
 			return
 		}
@@ -98,11 +76,7 @@ func (h *Handlers) HandleChannelFollows(w http.ResponseWriter, r *http.Request) 
 			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "Missing category_id"})
 			return
 		}
-
-		_, err := h.Pool.Exec(r.Context(),
-			"DELETE FROM channel_follows WHERE user_id = $1 AND category_id = $2",
-			userID, body.CategoryID)
-		if err != nil {
+		if err := h.Store.RemoveChannelFollow(r.Context(), userID, body.CategoryID); err != nil {
 			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
 			return
 		}
@@ -116,29 +90,10 @@ func (h *Handlers) HandleNotificationPreferences(w http.ResponseWriter, r *http.
 
 	switch r.Method {
 	case http.MethodGet:
-		rows, err := h.Pool.Query(r.Context(),
-			"SELECT category, enabled FROM notification_preferences WHERE user_id = $1", userID)
+		prefs, err := h.Store.ListNotificationPrefs(r.Context(), userID)
 		if err != nil {
 			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
 			return
-		}
-		defer rows.Close()
-
-		type pref struct {
-			Category string `json:"category"`
-			Enabled  bool   `json:"enabled"`
-		}
-		var prefs []pref
-		for rows.Next() {
-			var p pref
-			if err := rows.Scan(&p.Category, &p.Enabled); err != nil {
-				writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
-				return
-			}
-			prefs = append(prefs, p)
-		}
-		if prefs == nil {
-			prefs = []pref{}
 		}
 		writeJSON(w, http.StatusOK, prefs)
 
@@ -160,13 +115,7 @@ func (h *Handlers) HandleNotificationPreferences(w http.ResponseWriter, r *http.
 			return
 		}
 
-		_, err := h.Pool.Exec(r.Context(),
-			`INSERT INTO notification_preferences (user_id, category, enabled, updated_at)
-			 VALUES ($1, $2, $3, $4)
-			 ON CONFLICT (user_id, category)
-			 DO UPDATE SET enabled = $3, updated_at = $4`,
-			userID, body.Category, body.Enabled, time.Now().UTC())
-		if err != nil {
+		if err := h.Store.UpsertNotificationPref(r.Context(), userID, body.Category, body.Enabled); err != nil {
 			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
 			return
 		}

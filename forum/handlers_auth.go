@@ -38,19 +38,14 @@ func (h *Handlers) HandleSignup(w http.ResponseWriter, r *http.Request) {
 	body.Email = strings.TrimSpace(body.Email)
 	body.Username = strings.TrimSpace(body.Username)
 
-	// Validate email
 	if !emailRegex.MatchString(body.Email) {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "Invalid email address"})
 		return
 	}
-
-	// Validate password
 	if len(body.Password) < 6 {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "Password must be at least 6 characters"})
 		return
 	}
-
-	// Validate username
 	if len(body.Username) < 3 || len(body.Username) > 30 {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "Username must be 3-30 characters"})
 		return
@@ -61,11 +56,10 @@ func (h *Handlers) HandleSignup(w http.ResponseWriter, r *http.Request) {
 	}
 
 	ctx := r.Context()
-
-	// Check email uniqueness via GoTrue admin API
 	gotrueURL := h.Config.GoTrueURL
 	serviceKey := h.Config.GoTrueServiceRoleKey
 
+	// Check email uniqueness via GoTrue admin API
 	req, _ := http.NewRequestWithContext(ctx, http.MethodGet, gotrueURL+"/admin/users", nil)
 	req.Header.Set("Authorization", "Bearer "+serviceKey)
 	req.Header.Set("Content-Type", "application/json")
@@ -91,11 +85,8 @@ func (h *Handlers) HandleSignup(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// Check username uniqueness
-	var exists bool
-	err = h.Pool.QueryRow(ctx,
-		"SELECT EXISTS(SELECT 1 FROM profiles WHERE username = $1)", body.Username,
-	).Scan(&exists)
+	// Check username uniqueness via store
+	exists, err := h.Store.UsernameExists(ctx, body.Username)
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "database error"})
 		return
@@ -163,14 +154,8 @@ func (h *Handlers) HandleSignup(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Create profile
-	_, err = h.Pool.Exec(ctx,
-		`INSERT INTO profiles (id, username, display_name)
-		 VALUES ($1, $2, $3)
-		 ON CONFLICT (id) DO UPDATE SET username = $2, display_name = $3`,
-		gotrueResp.User.ID, body.Username, body.Username)
-	if err != nil {
-		// Rollback: delete auth user
+	// Create profile via store
+	if err := h.Store.CreateProfileSimple(ctx, gotrueResp.User.ID, body.Username, body.Username); err != nil {
 		deleteGoTrueUser(gotrueURL, serviceKey, gotrueResp.User.ID)
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "Failed to create profile"})
 		return
@@ -305,10 +290,10 @@ func gotrueVerifyOTP(gotrueURL, serviceKey, tokenHash string) (accessToken, refr
 func gotrueAdminGetUser(gotrueURL, serviceKey, userID string) (email string, err error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-	req, _ := http.NewRequestWithContext(ctx, http.MethodGet, gotrueURL+"/admin/users/"+userID, nil)
+	req, _ := http.NewRequestWithContext(ctx, http.MethodGet, gotrueURL+"/admin/users/"+userID, nil) // #nosec G704 -- gotrueURL is from trusted env var
 	req.Header.Set("Authorization", "Bearer "+serviceKey)
 
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := http.DefaultClient.Do(req) // #nosec G704
 	if err != nil {
 		return "", fmt.Errorf("get user request failed: %w", err)
 	}

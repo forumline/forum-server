@@ -7,16 +7,39 @@ import (
 	"time"
 
 	"github.com/go-chi/chi/v5"
+
+	"github.com/forumline/forum-server/forum/service"
+	"github.com/forumline/forum-server/forum/store"
 	shared "github.com/forumline/forumline/shared-go"
 )
 
 func NewRouter(pool shared.DB, sseHub *shared.SSEHub, cfg *Config) *chi.Mux {
 	r := chi.NewRouter()
 
+	// Create layers
+	s := store.New(pool)
+
+	notifSvc := service.NewNotificationService(s, &service.NotificationConfig{
+		ForumlineURL:          cfg.ForumlineURL,
+		ForumlineClientID:     cfg.ForumlineClientID,
+		ForumlineClientSecret: cfg.ForumlineClientSecret,
+	})
+	threadSvc := service.NewThreadService(s)
+	postSvc := service.NewPostService(s, notifSvc)
+	profileSvc := service.NewProfileService(s)
+	chatSvc := service.NewChatService(s)
+	adminSvc := service.NewAdminService(s)
+
 	h := &Handlers{
-		Pool:   pool,
-		SSEHub: sseHub,
-		Config: cfg,
+		SSEHub:          sseHub,
+		Config:          cfg,
+		Store:           s,
+		ThreadSvc:       threadSvc,
+		PostSvc:         postSvc,
+		ProfileSvc:      profileSvc,
+		ChatSvc:         chatSvc,
+		AdminSvc:        adminSvc,
+		NotificationSvc: notifSvc,
 	}
 
 	// Rate limiters

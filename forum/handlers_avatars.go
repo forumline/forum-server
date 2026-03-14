@@ -22,7 +22,6 @@ func (h *Handlers) r2Client() (*minio.Client, error) {
 
 // HandleAvatarUpload accepts a multipart file upload and stores it in R2.
 // POST /api/avatars/upload
-// Form fields: file (required), path (optional, defaults to user/{userId}/custom.png)
 func (h *Handlers) HandleAvatarUpload(w http.ResponseWriter, r *http.Request) {
 	userID := shared.UserIDFromContext(r.Context())
 
@@ -40,24 +39,20 @@ func (h *Handlers) HandleAvatarUpload(w http.ResponseWriter, r *http.Request) {
 	}
 	defer func() { _ = file.Close() }()
 
-	// Determine content type
 	contentType := header.Header.Get("Content-Type")
 	if contentType == "" {
 		contentType = "image/png"
 	}
 
-	// Only allow image types
 	if !strings.HasPrefix(contentType, "image/") {
 		http.Error(w, "Only image files allowed", http.StatusBadRequest)
 		return
 	}
 
-	// Determine path — allow caller to specify
 	path := r.FormValue("path")
 	if path == "" {
 		path = fmt.Sprintf("user/%s/custom.png", userID)
 	}
-	// Security: allow user/{userID}/ for user avatars, thread/ for thread images (any authenticated user can upload)
 	userPrefix := fmt.Sprintf("user/%s/", userID)
 	if !strings.HasPrefix(path, userPrefix) && !strings.HasPrefix(path, "thread/") {
 		http.Error(w, "Invalid path", http.StatusForbidden)

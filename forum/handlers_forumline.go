@@ -14,17 +14,9 @@ import (
 	"time"
 
 	"github.com/golang-jwt/jwt/v5"
+	"github.com/forumline/forum-server/forum/model"
 	shared "github.com/forumline/forumline/shared-go"
 )
-
-// forumlineIdentity represents a Forumline identity.
-type forumlineIdentity struct {
-	ForumlineID string `json:"forumline_id"`
-	Username    string `json:"username"`
-	DisplayName string `json:"display_name"`
-	AvatarURL   string `json:"avatar_url"`
-	Bio         string `json:"bio,omitempty"`
-}
 
 // HandleForumlineAuth handles GET/POST /api/forumline/auth.
 // Supports three flows:
@@ -276,20 +268,15 @@ func (h *Handlers) handleLinkCallback(w http.ResponseWriter, r *http.Request, li
 	}
 
 	// Check that forumline_id isn't already linked to a different local account
-	var existingID *string
-	err = h.Pool.QueryRow(r.Context(),
-		"SELECT id FROM profiles WHERE forumline_id = $1", identity.ForumlineID).Scan(&existingID)
-	if err == nil && existingID != nil && *existingID != linkUID {
+	existingID, err := h.Store.GetProfileIDByForumlineID(r.Context(), identity.ForumlineID)
+	if err == nil && existingID != "" && existingID != linkUID {
 		log.Println("[Forumline:Link] forumline_id already linked to another account")
 		http.Redirect(w, r, h.Config.SiteURL+"/settings?error=already_linked", http.StatusFound)
 		return
 	}
 
 	// Link: update the user's profile with the forumline_id
-	_, err = h.Pool.Exec(r.Context(),
-		"UPDATE profiles SET forumline_id = $1 WHERE id = $2",
-		identity.ForumlineID, linkUID)
-	if err != nil {
+	if err := h.Store.SetForumlineID(r.Context(), linkUID, identity.ForumlineID); err != nil {
 		log.Printf("[Forumline:Link] Profile update failed: %v", err)
 		http.Redirect(w, r, h.Config.SiteURL+"/settings?error=link_failed", http.StatusFound)
 		return
@@ -346,7 +333,6 @@ func (h *Handlers) handleNormalCallback(w http.ResponseWriter, r *http.Request) 
 	h.setForumlineCookies(w, identityToken, localUserID, forumlineAccessToken)
 
 	if h.isHostedMode() {
-		// In hosted mode, sign our own session JWT and redirect with it
 		accessToken, err := h.signHostedSession(localUserID)
 		if err != nil {
 			log.Printf("[Forumline:Callback] signHostedSession failed: %v", err)
@@ -357,7 +343,6 @@ func (h *Handlers) handleNormalCallback(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
-	// Single-tenant: call afterAuth for GoTrue session
 	redirectURL := h.afterAuth(localUserID)
 	if redirectURL != "" {
 		http.Redirect(w, r, redirectURL, http.StatusFound)
@@ -378,10 +363,8 @@ func (h *Handlers) HandleForumlineToken(w http.ResponseWriter, r *http.Request) 
 	localUserID := cookies["forumline_user_id"]
 
 	if localUserID != "" {
-		// Verify user still has forumline_id
-		var forumlineID *string
-		if err := h.Pool.QueryRow(r.Context(),
-			"SELECT forumline_id FROM profiles WHERE id = $1", localUserID).Scan(&forumlineID); err != nil {
+		forumlineID, err := h.Store.GetForumlineID(r.Context(), localUserID)
+		if err != nil {
 			log.Printf("query forumline_id error: %v", err)
 		}
 
@@ -416,11 +399,9 @@ func (h *Handlers) handleDisconnect(w http.ResponseWriter, r *http.Request) {
 	forumlineAccessToken := cookies["forumline_access_token"]
 
 	if forumlineAccessToken != "" && h.Config.ForumlineGoTrueURL != "" {
-		// Revoke Forumline session via GoTrue
 		gotrueAdminSignOut(h.Config.ForumlineGoTrueURL, h.Config.ForumlineServiceRoleKey, forumlineAccessToken)
 	}
 
-	// Clear all Forumline cookies
 	for _, name := range []string{"forumline_identity", "forumline_user_id", "forumline_access_token"} {
 		http.SetCookie(w, &http.Cookie{
 			Name: name, Value: "",
@@ -441,7 +422,6 @@ func (h *Handlers) handleSessionGet(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Verify JWT signature
 	var payload map[string]interface{}
 	if h.Config.ForumlineJWTSecret != "" {
 		token, err := jwt.Parse(identityToken, func(t *jwt.Token) (interface{}, error) {
@@ -459,8 +439,6 @@ func (h *Handlers) handleSessionGet(w http.ResponseWriter, r *http.Request) {
 			payload = claims
 		}
 	} else {
-		// No JWT secret configured — reject all tokens.
-		// Unverified JWT parsing is unsafe; require FORUMLINE_JWT_SECRET to be set.
 		log.Printf("[Forumline:Session] FORUMLINE_JWT_SECRET not configured, rejecting identity token")
 		h.clearForumlineCookies(w)
 		writeJSON(w, http.StatusOK, nil)
@@ -480,7 +458,7 @@ func (h *Handlers) handleSessionGet(w http.ResponseWriter, r *http.Request) {
 }
 
 // exchangeCodeForTokens exchanges an OAuth auth code for identity + tokens.
-func (h *Handlers) exchangeCodeForTokens(code, redirectURI string) (*forumlineIdentity, string, string, error) {
+func (h *Handlers) exchangeCodeForTokens(code, redirectURI string) (*model.ForumlineIdentity, string, string, error) {
 	payload, _ := json.Marshal(map[string]string{
 		"code":          code,
 		"client_id":     h.Config.ForumlineClientID,
@@ -504,9 +482,9 @@ func (h *Handlers) exchangeCodeForTokens(code, redirectURI string) (*forumlineId
 	}
 
 	var tokenData struct {
-		Identity       *forumlineIdentity `json:"identity"`
-		IdentityToken  string             `json:"identity_token"`
-		HubAccessToken string             `json:"forumline_access_token"`
+		Identity       *model.ForumlineIdentity `json:"identity"`
+		IdentityToken  string                   `json:"identity_token"`
+		HubAccessToken string                   `json:"forumline_access_token"`
 	}
 	if err := json.NewDecoder(resp.Body).Decode(&tokenData); err != nil {
 		return nil, "", "", fmt.Errorf("failed to parse token response: %w", err)
@@ -520,20 +498,13 @@ func (h *Handlers) exchangeCodeForTokens(code, redirectURI string) (*forumlineId
 }
 
 // createOrLinkUser creates or links a local user from a Forumline identity.
-func (h *Handlers) createOrLinkUser(r *http.Request, identity *forumlineIdentity, forumlineAccessToken string) (string, error) {
+func (h *Handlers) createOrLinkUser(r *http.Request, identity *model.ForumlineIdentity, forumlineAccessToken string) (string, error) {
 	ctx := r.Context()
 
 	// 1. Check if a local profile already has this forumline_id
-	var existingID string
-	err := h.Pool.QueryRow(ctx,
-		"SELECT id FROM profiles WHERE forumline_id = $1", identity.ForumlineID).Scan(&existingID)
+	existingID, err := h.Store.GetProfileIDByForumlineID(ctx, identity.ForumlineID)
 	if err == nil && existingID != "" {
-		// Update display info
-		if _, err := h.Pool.Exec(ctx,
-			"UPDATE profiles SET display_name = $1 WHERE id = $2",
-			identity.DisplayName, existingID); err != nil {
-			log.Printf("update display_name error: %v", err)
-		}
+		_ = h.Store.UpdateDisplayName(ctx, existingID, identity.DisplayName)
 		return existingID, nil
 	}
 
@@ -544,25 +515,17 @@ func (h *Handlers) createOrLinkUser(r *http.Request, identity *forumlineIdentity
 	}
 
 	if forumlineEmail != "" {
-		// Check if a local GoTrue user with this email already exists
 		users, err := gotrueAdminListUsers(h.Config.GoTrueURL, h.Config.GoTrueServiceRoleKey)
 		if err == nil {
 			for _, u := range users {
 				if strings.EqualFold(u.Email, forumlineEmail) {
-					// User exists in GoTrue — check if they were created by a previous
-					// Forumline login (has forumline_id in metadata) or are a local account.
 					if meta, ok := u.UserMetadata["forumline_id"].(string); ok && meta == identity.ForumlineID {
-						// This GoTrue user was created by a previous Forumline login.
-						// Link the profile and return.
-						h.ensureProfileWithForumlineID(ctx, u.ID, identity)
+						_ = h.Store.EnsureProfileWithForumlineID(ctx, u.ID, identity)
 						return u.ID, nil
 					}
-					// Check if there's a profile without forumline_id that we can claim
-					var profileID string
-					err := h.Pool.QueryRow(ctx,
-						"SELECT id FROM profiles WHERE id = $1 AND (forumline_id IS NULL OR forumline_id = '')", u.ID).Scan(&profileID)
+					profileID, err := h.Store.GetProfileIDByForumlineIDUnlinked(ctx, u.ID)
 					if err == nil && profileID != "" {
-						h.ensureProfileWithForumlineID(ctx, profileID, identity)
+						_ = h.Store.EnsureProfileWithForumlineID(ctx, profileID, identity)
 						return profileID, nil
 					}
 					return "", fmt.Errorf("EMAIL_COLLISION: a local account with this email already exists, sign in locally and connect Forumline from Settings")
@@ -570,7 +533,6 @@ func (h *Handlers) createOrLinkUser(r *http.Request, identity *forumlineIdentity
 			}
 		}
 
-		// Create new local user with Forumline email
 		newUserID, err := gotrueAdminCreateUser(h.Config.GoTrueURL, h.Config.GoTrueServiceRoleKey, map[string]interface{}{
 			"email":         forumlineEmail,
 			"password":      randomHex(16),
@@ -585,16 +547,16 @@ func (h *Handlers) createOrLinkUser(r *http.Request, identity *forumlineIdentity
 			return "", fmt.Errorf("failed to create local user: %w", err)
 		}
 
-		h.ensureProfileWithForumlineID(ctx, newUserID, identity)
+		_ = h.Store.EnsureProfileWithForumlineID(ctx, newUserID, identity)
 		return newUserID, nil
 	}
 
-	// 3. Fallback: check existing GoTrue users for matching forumline_id before creating
+	// 3. Fallback: check existing GoTrue users for matching forumline_id
 	users, listErr := gotrueAdminListUsers(h.Config.GoTrueURL, h.Config.GoTrueServiceRoleKey)
 	if listErr == nil {
 		for _, u := range users {
 			if meta, ok := u.UserMetadata["forumline_id"].(string); ok && meta == identity.ForumlineID {
-				h.ensureProfileWithForumlineID(ctx, u.ID, identity)
+				_ = h.Store.EnsureProfileWithForumlineID(ctx, u.ID, identity)
 				return u.ID, nil
 			}
 		}
@@ -614,19 +576,8 @@ func (h *Handlers) createOrLinkUser(r *http.Request, identity *forumlineIdentity
 		return "", fmt.Errorf("failed to create local user: %w", err)
 	}
 
-	h.ensureProfileWithForumlineID(ctx, newUserID, identity)
+	_ = h.Store.EnsureProfileWithForumlineID(ctx, newUserID, identity)
 	return newUserID, nil
-}
-
-// ensureProfileWithForumlineID creates or updates a profile with the forumline_id set.
-func (h *Handlers) ensureProfileWithForumlineID(ctx context.Context, userID string, identity *forumlineIdentity) {
-	if _, err := h.Pool.Exec(ctx,
-		`INSERT INTO profiles (id, username, display_name, forumline_id)
-		 VALUES ($1, $2, $3, $4)
-		 ON CONFLICT (id) DO UPDATE SET forumline_id = $4, display_name = $3`,
-		userID, identity.Username, identity.DisplayName, identity.ForumlineID); err != nil {
-		log.Printf("ensureProfileWithForumlineID error: %v", err)
-	}
 }
 
 // setForumlineCookies sets the standard set of Forumline httpOnly cookies.
@@ -678,48 +629,25 @@ func nilIfEmpty(s string) interface{} {
 
 // --- Hosted mode (no GoTrue) ---
 
-// isHostedMode returns true when there's no local GoTrue instance.
-// In hosted mode, users authenticate exclusively via Forumline identity.
 func (h *Handlers) isHostedMode() bool {
 	return h.Config.GoTrueURL == ""
 }
 
-// createOrLinkUserHosted creates or links a local profile without GoTrue.
-// Profile UUIDs are generated directly; the forumline_id is the source of truth.
-func (h *Handlers) createOrLinkUserHosted(r *http.Request, identity *forumlineIdentity) (string, error) {
+func (h *Handlers) createOrLinkUserHosted(r *http.Request, identity *model.ForumlineIdentity) (string, error) {
 	ctx := r.Context()
 
-	// Check if a profile with this forumline_id already exists
-	var existingID string
-	err := h.Pool.QueryRow(ctx,
-		"SELECT id FROM profiles WHERE forumline_id = $1", identity.ForumlineID).Scan(&existingID)
+	existingID, err := h.Store.GetProfileIDByForumlineID(ctx, identity.ForumlineID)
 	if err == nil && existingID != "" {
-		// Update display info
-		if _, err := h.Pool.Exec(ctx,
-			"UPDATE profiles SET display_name = $1, avatar_url = $2, updated_at = now() WHERE id = $3",
-			identity.DisplayName, identity.AvatarURL, existingID); err != nil {
-			log.Printf("update hosted profile error: %v", err)
-		}
+		_ = h.Store.UpdateDisplayNameAndAvatar(ctx, existingID, identity.DisplayName, identity.AvatarURL)
 		return existingID, nil
 	}
 
-	// Create new profile — use forumline_id as the profile UUID to keep things simple.
-	// This works because forumline_id is already a UUID.
-	_, err = h.Pool.Exec(ctx,
-		`INSERT INTO profiles (id, username, display_name, avatar_url, forumline_id)
-		 VALUES ($1, $2, $3, $4, $5)
-		 ON CONFLICT (id) DO UPDATE SET forumline_id = $5, display_name = $3`,
-		identity.ForumlineID, identity.Username, identity.DisplayName, identity.AvatarURL, identity.ForumlineID)
-	if err != nil {
+	if err := h.Store.CreateProfileHosted(ctx, identity); err != nil {
 		return "", fmt.Errorf("create profile: %w", err)
 	}
-
 	return identity.ForumlineID, nil
 }
 
-// signHostedSession creates a JWT for hosted-mode auth.
-// The JWT uses the same format as GoTrue tokens so the existing auth middleware
-// validates it transparently. Signed with JWT_SECRET (HMAC).
 func (h *Handlers) signHostedSession(userID string) (string, error) {
 	secret := h.Config.ForumlineJWTSecret
 	if secret == "" {

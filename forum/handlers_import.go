@@ -9,28 +9,20 @@ import (
 
 // HandleImport imports forum data from a forumline export file.
 // POST /api/admin/import
-// Body: the JSON export file from a hosted forum's export endpoint.
-// Requires admin authentication.
 func (h *Handlers) HandleImport(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "method not allowed"})
 		return
 	}
 
-	// Verify the user is an admin
 	userID := shared.UserIDFromContext(r.Context())
 	if userID == "" {
 		writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "authentication required"})
 		return
 	}
 
-	var isAdmin bool
-	if err := h.Pool.QueryRow(r.Context(), "SELECT is_admin FROM profiles WHERE id = $1", userID).Scan(&isAdmin); err != nil {
-		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "database error"})
-		return
-	}
-	if !isAdmin {
-		writeJSON(w, http.StatusForbidden, map[string]string{"error": "admin access required"})
+	if err := h.AdminSvc.VerifyAdmin(r.Context(), userID); err != nil {
+		writeServiceError(w, err)
 		return
 	}
 
@@ -45,7 +37,7 @@ func (h *Handlers) HandleImport(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if err := Import(r.Context(), h.Pool, &data); err != nil {
+	if err := Import(r.Context(), h.Store.DB, &data); err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "import failed: " + err.Error()})
 		return
 	}

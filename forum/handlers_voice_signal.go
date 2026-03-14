@@ -31,7 +31,6 @@ func (h *Handlers) HandleVoiceSignal(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Build signal payload and fire pg_notify directly (no table needed — signals are transient)
 	signal := map[string]interface{}{
 		"sender_user_id": senderID,
 		"target_user_id": body.TargetUserID,
@@ -39,15 +38,8 @@ func (h *Handlers) HandleVoiceSignal(w http.ResponseWriter, r *http.Request) {
 		"room_slug":      body.RoomSlug,
 		"payload":        body.Payload,
 	}
-	signalJSON, err := json.Marshal(signal)
-	if err != nil {
-		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "failed to encode signal"})
-		return
-	}
 
-	_, err = h.Pool.Exec(r.Context(),
-		"SELECT pg_notify('voice_signal_changes', $1)", string(signalJSON))
-	if err != nil {
+	if err := h.Store.SendVoiceSignal(r.Context(), signal); err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "failed to send signal"})
 		return
 	}
