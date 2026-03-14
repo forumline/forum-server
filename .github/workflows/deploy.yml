@@ -17,7 +17,7 @@ jobs:
       - name: Fetch encrypted env from monorepo
         run: |
           curl -fsSL \
-            "https://raw.githubusercontent.com/forumline/forumline/main/forum-server/deploy/.env.enc" \
+            "https://raw.githubusercontent.com/forumline/forumline/main/services/forum/deploy/.env.enc" \
             -o /tmp/.env.enc
 
       - name: Install sops and age
