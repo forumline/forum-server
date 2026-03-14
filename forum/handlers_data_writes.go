@@ -292,7 +292,11 @@ func (h *Handlers) generatePostNotifications(threadID, postID, authorID, content
 
 // pushToForumline sends a batch of notifications to the forumline API webhook.
 func (h *Handlers) pushToForumline(items []forumlinePushItem) {
-	if h.Config.ForumlineURL == "" || h.Config.ForumlineJWTSecret == "" {
+	webhookBase := h.Config.ForumlineWebhookURL
+	if webhookBase == "" {
+		webhookBase = h.Config.ForumlineURL
+	}
+	if webhookBase == "" || h.Config.ForumlineJWTSecret == "" {
 		return
 	}
 
@@ -313,10 +317,10 @@ func (h *Handlers) pushToForumline(items []forumlinePushItem) {
 	var endpoint string
 	var payload []byte
 	if len(items) == 1 {
-		endpoint = h.Config.ForumlineURL + "/api/webhooks/notification"
+		endpoint = webhookBase + "/api/webhooks/notification"
 		payload, _ = json.Marshal(items[0])
 	} else {
-		endpoint = h.Config.ForumlineURL + "/api/webhooks/notifications"
+		endpoint = webhookBase + "/api/webhooks/notifications"
 		payload, _ = json.Marshal(items)
 	}
 

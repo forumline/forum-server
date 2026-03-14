@@ -59,6 +59,7 @@ func main() {
 		ForumName:         os.Getenv("FORUM_NAME"),
 		IconURL:           os.Getenv("FORUM_ICON_URL"),
 		ForumlineURL:            os.Getenv("FORUMLINE_APP_URL"),
+		ForumlineWebhookURL:     os.Getenv("FORUMLINE_WEBHOOK_URL"),
 		ForumlineClientID:       os.Getenv("FORUMLINE_CLIENT_ID"),
 		ForumlineClientSecret:   os.Getenv("FORUMLINE_CLIENT_SECRET"),
 		ForumlineJWTSecret:      os.Getenv("FORUMLINE_JWT_SECRET"),

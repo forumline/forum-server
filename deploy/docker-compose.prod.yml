@@ -89,6 +89,7 @@ services:
       CORS_ALLOWED_ORIGINS: "https://demo.forumline.net,https://app.forumline.net"
       # Forumline integration
       FORUMLINE_APP_URL: "${FORUMLINE_APP_URL}"
+      FORUMLINE_WEBHOOK_URL: "${FORUMLINE_WEBHOOK_URL}"
       FORUMLINE_CLIENT_ID: "${FORUMLINE_CLIENT_ID}"
       FORUMLINE_CLIENT_SECRET: "${FORUMLINE_CLIENT_SECRET}"
       FORUMLINE_JWT_SECRET: "${FORUMLINE_JWT_SECRET}"

@@ -26,6 +26,7 @@ type Config struct {
 	ForumName            string
 	IconURL              string
 	ForumlineURL               string
+	ForumlineWebhookURL        string // direct URL for webhook push (falls back to ForumlineURL)
 	ForumlineClientID          string
 	ForumlineClientSecret      string
 	ForumlineJWTSecret         string
