@@ -1,14 +1,20 @@
 package forum
 
 import (
+	"context"
 	"encoding/json"
+	"fmt"
 	"log"
 	"net/http"
+	"regexp"
+	"strings"
 	"time"
 
 	"github.com/go-chi/chi/v5"
 	shared "github.com/forumline/forumline/shared-go"
 )
+
+var mentionRe = regexp.MustCompile(`@(\w+)`)
 
 // ============================================================================
 // Thread writes
@@ -169,7 +175,98 @@ func (h *Handlers) HandleCreatePost(w http.ResponseWriter, r *http.Request) {
 		log.Printf("update thread stats error: %v", err)
 	}
 
+	// Generate notifications (best-effort, don't fail the request).
+	// Uses background context because the request context is cancelled after response.
+	go h.generatePostNotifications(body.ThreadID, id, userID, body.Content, body.ReplyToID) //nolint:gosec // intentional background goroutine
+
 	writeJSON(w, http.StatusCreated, map[string]string{"id": id})
+}
+
+// generatePostNotifications creates notification rows for @mentions and thread reply notifications.
+func (h *Handlers) generatePostNotifications(threadID, postID, authorID, content string, replyToID *string) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	// Look up author username
+	var authorUsername string
+	_ = h.Pool.QueryRow(ctx,
+		`SELECT username FROM profiles WHERE id = $1`, authorID).Scan(&authorUsername)
+	if authorUsername == "" {
+		authorUsername = "Someone"
+	}
+
+	// Look up thread title and OP author
+	var threadTitle string
+	var threadAuthorID string
+	_ = h.Pool.QueryRow(ctx,
+		`SELECT t.title, p.author_id FROM threads t
+		 JOIN posts p ON p.thread_id = t.id
+		 WHERE t.id = $1 ORDER BY p.created_at ASC LIMIT 1`,
+		threadID).Scan(&threadTitle, &threadAuthorID)
+
+	threadLink := fmt.Sprintf("/t/%s", threadID)
+	notified := map[string]bool{authorID: true} // don't notify the post author
+
+	// 1. Notify thread author about the reply (unless they're the one replying)
+	if threadAuthorID != "" && !notified[threadAuthorID] {
+		notified[threadAuthorID] = true
+		_, err := h.Pool.Exec(ctx,
+			`INSERT INTO notifications (user_id, type, title, message, link)
+			 VALUES ($1, $2, $3, $4, $5)`,
+			threadAuthorID, "reply",
+			fmt.Sprintf("<strong>%s</strong> replied in \"%s\"", authorUsername, threadTitle),
+			truncate(content, 200), threadLink)
+		if err != nil {
+			log.Printf("[notifications] failed to notify thread author: %v", err)
+		}
+	}
+
+	// 2. If this is a reply to a specific post, notify that post's author
+	if replyToID != nil && *replyToID != "" {
+		var replyAuthorID string
+		_ = h.Pool.QueryRow(ctx,
+			`SELECT author_id FROM posts WHERE id = $1`, *replyToID).Scan(&replyAuthorID)
+		if replyAuthorID != "" && !notified[replyAuthorID] {
+			notified[replyAuthorID] = true
+			_, err := h.Pool.Exec(ctx,
+				`INSERT INTO notifications (user_id, type, title, message, link)
+				 VALUES ($1, $2, $3, $4, $5)`,
+				replyAuthorID, "reply",
+				fmt.Sprintf("<strong>%s</strong> replied to your post in \"%s\"", authorUsername, threadTitle),
+				truncate(content, 200), threadLink)
+			if err != nil {
+				log.Printf("[notifications] failed to notify reply parent author: %v", err)
+			}
+		}
+	}
+
+	// 3. Notify @mentioned users
+	matches := mentionRe.FindAllStringSubmatch(content, -1)
+	for _, match := range matches {
+		username := strings.ToLower(match[1])
+		var mentionedUserID string
+		_ = h.Pool.QueryRow(ctx,
+			`SELECT id FROM profiles WHERE lower(username) = $1`, username).Scan(&mentionedUserID)
+		if mentionedUserID != "" && !notified[mentionedUserID] {
+			notified[mentionedUserID] = true
+			_, err := h.Pool.Exec(ctx,
+				`INSERT INTO notifications (user_id, type, title, message, link)
+				 VALUES ($1, $2, $3, $4, $5)`,
+				mentionedUserID, "mention",
+				fmt.Sprintf("<strong>%s</strong> mentioned you in \"%s\"", authorUsername, threadTitle),
+				truncate(content, 200), threadLink)
+			if err != nil {
+				log.Printf("[notifications] failed to notify mentioned user %s: %v", username, err)
+			}
+		}
+	}
+}
+
+func truncate(s string, maxLen int) string {
+	if len(s) <= maxLen {
+		return s
+	}
+	return s[:maxLen] + "..."
 }
 
 // ============================================================================
