@@ -13,7 +13,6 @@ import (
 	"time"
 
 	"github.com/go-chi/chi/v5"
-	"github.com/golang-jwt/jwt/v5"
 	shared "github.com/forumline/forumline/shared-go"
 )
 
@@ -292,34 +291,34 @@ func (h *Handlers) generatePostNotifications(threadID, postID, authorID, content
 }
 
 // pushToForumline sends a batch of notifications to the forumline API webhook.
+// Authenticates using the forum's OAuth client credentials (client_id + client_secret).
 func (h *Handlers) pushToForumline(items []forumlinePushItem) {
-	webhookBase := h.Config.ForumlineURL
-	if webhookBase == "" || h.Config.ForumlineJWTSecret == "" {
-		return
-	}
-
-	// Sign a JWT: sub=forum domain, iss="forum"
-	now := time.Now()
-	token := jwt.NewWithClaims(jwt.SigningMethodHS256, jwt.RegisteredClaims{
-		Subject:   h.Config.Domain,
-		Issuer:    "forum",
-		IssuedAt:  jwt.NewNumericDate(now),
-		ExpiresAt: jwt.NewNumericDate(now.Add(time.Minute)),
-	})
-	tokenStr, err := token.SignedString([]byte(h.Config.ForumlineJWTSecret))
-	if err != nil {
-		log.Printf("[notifications] failed to sign forumline token: %v", err)
+	if h.Config.ForumlineURL == "" || h.Config.ForumlineClientID == "" || h.Config.ForumlineClientSecret == "" {
 		return
 	}
 
 	var endpoint string
 	var payload []byte
 	if len(items) == 1 {
-		endpoint = webhookBase + "/api/webhooks/notification"
-		payload, _ = json.Marshal(items[0])
+		endpoint = h.Config.ForumlineURL + "/api/webhooks/notification"
+		wrapper := map[string]interface{}{
+			"client_id":        h.Config.ForumlineClientID,
+			"client_secret":    h.Config.ForumlineClientSecret,
+			"forumline_user_id": items[0].ForumlineUserID,
+			"type":             items[0].Type,
+			"title":            items[0].Title,
+			"body":             items[0].Body,
+			"link":             items[0].Link,
+		}
+		payload, _ = json.Marshal(wrapper)
 	} else {
-		endpoint = webhookBase + "/api/webhooks/notifications"
-		payload, _ = json.Marshal(items)
+		endpoint = h.Config.ForumlineURL + "/api/webhooks/notifications"
+		wrapper := map[string]interface{}{
+			"client_id":     h.Config.ForumlineClientID,
+			"client_secret": h.Config.ForumlineClientSecret,
+			"items":         items,
+		}
+		payload, _ = json.Marshal(wrapper)
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
@@ -330,7 +329,6 @@ func (h *Handlers) pushToForumline(items []forumlinePushItem) {
 		log.Printf("[notifications] failed to create forumline request: %v", err)
 		return
 	}
-	req.Header.Set("Authorization", "Bearer "+tokenStr)
 	req.Header.Set("Content-Type", "application/json")
 
 	resp, err := http.DefaultClient.Do(req)
@@ -342,7 +340,7 @@ func (h *Handlers) pushToForumline(items []forumlinePushItem) {
 
 	if resp.StatusCode >= 300 {
 		respBody, _ := io.ReadAll(io.LimitReader(resp.Body, 512))
-		log.Printf("[notifications] forumline webhook returned HTTP %d (url: %s, body: %s)", resp.StatusCode, endpoint, string(respBody))
+		log.Printf("[notifications] forumline webhook returned HTTP %d (body: %s)", resp.StatusCode, string(respBody))
 	}
 }
 
