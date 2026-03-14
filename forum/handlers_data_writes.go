@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"log"
 	"net/http"
 	"regexp"
@@ -292,10 +293,7 @@ func (h *Handlers) generatePostNotifications(threadID, postID, authorID, content
 
 // pushToForumline sends a batch of notifications to the forumline API webhook.
 func (h *Handlers) pushToForumline(items []forumlinePushItem) {
-	webhookBase := h.Config.ForumlineWebhookURL
-	if webhookBase == "" {
-		webhookBase = h.Config.ForumlineURL
-	}
+	webhookBase := h.Config.ForumlineURL
 	if webhookBase == "" || h.Config.ForumlineJWTSecret == "" {
 		return
 	}
@@ -340,10 +338,11 @@ func (h *Handlers) pushToForumline(items []forumlinePushItem) {
 		log.Printf("[notifications] push to forumline failed: %v", err)
 		return
 	}
-	_ = resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode >= 300 {
-		log.Printf("[notifications] forumline webhook returned HTTP %d (url: %s)", resp.StatusCode, endpoint)
+		respBody, _ := io.ReadAll(io.LimitReader(resp.Body, 512))
+		log.Printf("[notifications] forumline webhook returned HTTP %d (url: %s, body: %s)", resp.StatusCode, endpoint, string(respBody))
 	}
 }
 
