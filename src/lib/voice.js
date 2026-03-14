@@ -15,12 +15,7 @@ import { createStore } from '../state.js'
 import { authStore, getAccessToken } from './auth.js'
 import { getConfig } from './config.js'
 import { connectSSE } from './sse.js'
-import {
-  setStoreCallback, setEscalateCallback, sendEscalateSignal,
-  joinRoomP2P, leaveRoomP2P, toggleMuteP2P,
-  toggleDeafenP2P, handlePeerJoined,
-  cleanupP2P,
-} from './voice-p2p.js'
+import { VoiceSession } from '@forumline/shared-voice'
 
 export const voiceStore = createStore({
   isConnected: false,
@@ -38,33 +33,82 @@ export const voiceStore = createStore({
   roomParticipantCounts: {},
 })
 
-// Which backend is currently active: 'p2p' | 'livekit' | null
-let activeBackend = null
+let session = null
 let accessTokenCached = null
 const avatarCache = {}
 let presenceSSECleanup = null
 
-// LiveKit state (lazy-loaded)
-let livekitModule = null
-let room = null
+function createSession() {
+  const livekitUrl = getConfig().livekit_url || import.meta.env.VITE_LIVEKIT_URL
 
-async function getLivekit() {
-  if (!livekitModule) livekitModule = await import('livekit-client')
-  return livekitModule
+  const config = {
+    mode: 'auto',
+    escalateAt: 5,
+    getAuthToken: () => getAccessToken(),
+  }
+
+  if (livekitUrl) {
+    config.sfu = {
+      url: livekitUrl,
+      getRoomToken: async (roomName, participantName) => {
+        const token = await getAccessToken()
+        const resp = await fetch('/api/livekit', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${token}` },
+          body: JSON.stringify({ roomName, participantName }),
+        })
+        if (!resp.ok) throw new Error('Failed to get LiveKit token')
+        const data = await resp.json()
+        return data.token
+      },
+    }
+  }
+
+  return new VoiceSession(config)
 }
 
-// Wire up P2P store updates
-setStoreCallback((update) => {
-  if (activeBackend === 'p2p') voiceStore.set(update)
-})
+function syncState(state) {
+  voiceStore.set({
+    isConnected: state.status === 'connected' || state.status === 'active',
+    isConnecting: state.status === 'connecting',
+    isMuted: state.muted,
+    isDeafened: state.deafened,
+    isSpeaking: state.speaking,
+    isScreenSharing: state.screenSharing,
+    screenShareTrack: state.screenShareTrack,
+    screenShareParticipant: state.screenSharePeerId
+      ? { id: state.screenSharePeerId, name: state.screenSharePeerId }
+      : null,
+    connectError: state.error,
+    participants: state.peers.map(p => ({
+      id: p.id,
+      name: avatarCache[p.id]?.name || p.id.slice(0, 8),
+      avatar: (avatarCache[p.id]?.name || p.id).charAt(0).toUpperCase(),
+      avatarUrl: avatarCache[p.id]?.avatarUrl ?? null,
+      isSpeaking: p.speaking,
+      isMuted: p.muted,
+    })),
+  })
 
-// Wire up escalation requests from peers
-setEscalateCallback(() => {
-  if (activeBackend !== 'p2p') return
-  const slug = voiceStore.get().connectedRoomSlug
-  const name = voiceStore.get().connectedRoomName
-  if (slug) escalateToLiveKit(slug, name)
-})
+  // Resolve names for peers we haven't cached
+  const unresolved = state.peers.filter(p => !avatarCache[p.id])
+  if (unresolved.length > 0) {
+    const ids = unresolved.map(p => p.id).join(',')
+    fetch(`/api/profiles/batch?ids=${encodeURIComponent(ids)}`)
+      .then(r => r.json())
+      .then(data => {
+        for (const profile of data) {
+          avatarCache[profile.id] = {
+            name: profile.display_name || profile.username,
+            avatarUrl: profile.avatar_url,
+          }
+        }
+        // Re-sync with resolved names
+        if (session) syncState(session.state)
+      })
+      .catch(() => {})
+  }
+}
 
 function deletePresence() {
   const token = accessTokenCached
@@ -90,29 +134,24 @@ export async function fetchVoicePresence() {
       counts[row.room_slug].identities.push(row.user_id)
       const name = row.profile?.display_name || row.profile?.username || row.user_id.slice(0, 8)
       counts[row.room_slug].names.push(name)
-      if (row.profile && avatarCache[row.user_id] === undefined) {
-        avatarCache[row.user_id] = row.profile.avatar_url
+      if (row.profile && !avatarCache[row.user_id]) {
+        avatarCache[row.user_id] = {
+          name: row.profile.display_name || row.profile.username,
+          avatarUrl: row.profile.avatar_url,
+        }
       }
     }
     voiceStore.set({ roomParticipantCounts: counts })
 
-    // If we're in P2P mode, handle peer join/leave from presence changes
-    if (activeBackend === 'p2p') {
+    // Notify session of peer joins from presence
+    if (session && voiceStore.get().isConnected) {
       const slug = voiceStore.get().connectedRoomSlug
       if (slug) {
-        const roomPeers = data.filter(r => r.room_slug === slug)
         const { user } = authStore.get()
         if (user) {
-          const currentPeerIDs = new Set(roomPeers.map(p => p.user_id).filter(id => id !== user.id))
-
-          // Notify P2P module of joins
-          for (const id of currentPeerIDs) {
-            handlePeerJoined(id)
-          }
-
-          // Check if we need to escalate to LiveKit (5+ participants)
-          if (currentPeerIDs.size + 1 >= 5) {
-            escalateToLiveKit(slug, voiceStore.get().connectedRoomName)
+          const roomPeers = data.filter(r => r.room_slug === slug && r.user_id !== user.id)
+          for (const peer of roomPeers) {
+            session.addPeer(peer.user_id)
           }
         }
       }
@@ -126,7 +165,6 @@ export async function joinRoom(slug, name) {
 
   if (voiceStore.get().connectedRoomSlug === slug && voiceStore.get().isConnected) return
 
-  // Disconnect from any existing room
   if (voiceStore.get().isConnected) leaveRoom()
 
   voiceStore.set({ connectError: null, isConnecting: true })
@@ -138,29 +176,38 @@ export async function joinRoom(slug, name) {
 
     const displayName = user.username || user.user_metadata?.username || user.email.split('@')[0]
 
-    // Default: use P2P
-    activeBackend = 'p2p'
-    await joinRoomP2P(slug, name, user.id, displayName, accessToken)
+    session = createSession()
+    session.onStateChange(syncState)
+    await session.connect(user.id, displayName, slug)
+
+    // Write presence
+    await fetch('/api/voice-presence', {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${accessToken}` },
+      body: JSON.stringify({ room_slug: slug }),
+    }).catch(() => {})
 
     voiceStore.set({
       isConnected: true, isConnecting: false, isMuted: false, isDeafened: false,
       connectedRoomSlug: slug, connectedRoomName: name,
     })
+
+    // Connect to existing peers from presence
+    await fetchVoicePresence()
   } catch (err) {
-    activeBackend = null
+    session?.destroy()
+    session = null
     voiceStore.set({ connectError: err instanceof Error ? err.message : 'Failed to connect', isConnecting: false })
   }
 }
 
 export function leaveRoom() {
-  if (activeBackend === 'p2p') {
-    leaveRoomP2P()
-  } else if (activeBackend === 'livekit') {
-    leaveRoomLiveKit()
+  if (session) {
+    session.destroy()
+    session = null
   }
 
   deletePresence()
-  activeBackend = null
   voiceStore.set({
     isConnected: false, isConnecting: false, participants: [],
     connectedRoomSlug: null, connectedRoomName: null,
@@ -171,71 +218,25 @@ export function leaveRoom() {
 }
 
 export async function toggleMute() {
+  if (!session) return
   const newMuted = !voiceStore.get().isMuted
-  if (activeBackend === 'p2p') {
-    toggleMuteP2P(newMuted)
-  } else if (activeBackend === 'livekit' && room) {
-    await room.localParticipant.setMicrophoneEnabled(!newMuted)
-  }
-  voiceStore.set({ isMuted: newMuted })
+  session.setMuted(newMuted)
 }
 
 export function toggleDeafen() {
+  if (!session) return
   const newDeafened = !voiceStore.get().isDeafened
-  if (activeBackend === 'p2p') {
-    toggleDeafenP2P(newDeafened)
-  } else if (activeBackend === 'livekit' && room && livekitModule) {
-    const lk = livekitModule
-    room.remoteParticipants.forEach(p => {
-      p.getTrackPublications().forEach(pub => {
-        if (pub.track && pub.track.source === lk.Track.Source.Microphone) {
-          if (newDeafened) pub.track.detach()
-          else {
-            const el = pub.track.attach()
-            el.id = `audio-${p.identity}`
-            if (!document.getElementById(el.id)) document.body.appendChild(el)
-          }
-        }
-      })
-    })
-  }
-  voiceStore.set({ isDeafened: newDeafened })
-  if (newDeafened && !voiceStore.get().isMuted) {
-    toggleMute()
-  }
+  session.setDeafened(newDeafened)
 }
 
 export async function toggleScreenShare() {
-  // Screen sharing requires LiveKit — escalate if on P2P
-  if (activeBackend === 'p2p') {
-    const slug = voiceStore.get().connectedRoomSlug
-    const name = voiceStore.get().connectedRoomName
-    if (!slug) return
-
-    voiceStore.set({ isConnecting: true })
-    try {
-      // Tell all peers to escalate to LiveKit too
-      await sendEscalateSignal()
-      await escalateToLiveKit(slug, name)
-      // Now on LiveKit, start screen share
-      if (room) {
-        await room.localParticipant.setScreenShareEnabled(true)
-      }
-    } catch {
-      voiceStore.set({ isConnecting: false })
-    }
-    return
-  }
-
-  if (activeBackend === 'livekit' && room) {
-    try {
-      await room.localParticipant.setScreenShareEnabled(!voiceStore.get().isScreenSharing)
-    } catch {}
-  }
+  if (!session) return
+  const current = voiceStore.get().isScreenSharing
+  await session.setScreenShareEnabled(!current)
 }
 
 export function getAvatarUrl(identity) {
-  return avatarCache[identity] ?? null
+  return avatarCache[identity]?.avatarUrl ?? null
 }
 
 export function initVoice() {
@@ -243,173 +244,12 @@ export function initVoice() {
   presenceSSECleanup = connectSSE('/api/voice-presence/stream', () => fetchVoicePresence(), true)
 
   window.addEventListener('beforeunload', () => {
-    if (activeBackend === 'p2p') leaveRoomP2P()
-    if (activeBackend === 'livekit' && room) room.disconnect()
+    if (session) session.destroy()
     deletePresence()
   })
 }
 
 export function cleanupVoice() {
   if (presenceSSECleanup) presenceSSECleanup()
-  cleanupP2P()
-  if (room) { room.disconnect(); room = null }
-}
-
-// ---- LiveKit backend (for screen sharing and 5+ participant rooms) ----
-
-async function escalateToLiveKit(slug, name) {
-  const livekitUrl = getConfig().livekit_url || import.meta.env.VITE_LIVEKIT_URL
-  if (!livekitUrl) {
-    voiceStore.set({ connectError: 'LiveKit not available for screen sharing' })
-    return
-  }
-
-  const accessToken = accessTokenCached || await getAccessToken()
-  if (!accessToken) return
-
-  const { user } = authStore.get()
-  if (!user) return
-  const displayName = user.username || user.user_metadata?.username || user.email.split('@')[0]
-
-  // Get LiveKit token
-  const resp = await fetch('/api/livekit', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${accessToken}` },
-    body: JSON.stringify({ roomName: slug, participantName: displayName }),
-  })
-  if (!resp.ok) {
-    const err = await resp.json().catch(() => ({ error: 'Failed to get LiveKit token' }))
-    voiceStore.set({ connectError: err.error || 'Failed to escalate to LiveKit' })
-    return
-  }
-
-  const { token } = await resp.json()
-
-  // Connect to LiveKit while P2P is still active (overlap for seamless audio)
-  const lk = await getLivekit()
-  room = new lk.Room()
-
-  room.on(lk.RoomEvent.ParticipantConnected, updateLiveKitParticipants)
-  room.on(lk.RoomEvent.ParticipantDisconnected, updateLiveKitParticipants)
-  room.on(lk.RoomEvent.TrackMuted, updateLiveKitParticipants)
-  room.on(lk.RoomEvent.TrackUnmuted, updateLiveKitParticipants)
-  room.on(lk.RoomEvent.ActiveSpeakersChanged, updateLiveKitParticipants)
-
-  room.on(lk.RoomEvent.TrackSubscribed, (track, _pub, participant) => {
-    if (track.kind === lk.Track.Kind.Audio) {
-      const stream = new MediaStream([track.mediaStreamTrack])
-      const ctx = new AudioContext()
-      const source = ctx.createMediaStreamSource(stream)
-      const merger = ctx.createChannelMerger(2)
-      source.connect(merger, 0, 0)
-      source.connect(merger, 0, 1)
-      const dest = ctx.createMediaStreamDestination()
-      merger.connect(dest)
-      const el = new Audio()
-      el.id = `lk-audio-${track.sid}`
-      el.srcObject = dest.stream
-      el.autoplay = true
-      document.body.appendChild(el)
-    }
-    if (track.source === lk.Track.Source.ScreenShare && track.kind === lk.Track.Kind.Video) {
-      voiceStore.set({
-        screenShareTrack: track.mediaStreamTrack,
-        screenShareParticipant: { id: participant.identity, name: participant.name || participant.identity },
-      })
-    }
-  })
-
-  room.on(lk.RoomEvent.TrackUnsubscribed, (track) => {
-    if (track.source === lk.Track.Source.ScreenShare && track.kind === lk.Track.Kind.Video) {
-      voiceStore.set({ screenShareTrack: null, screenShareParticipant: null })
-    }
-    track.detach().forEach(el => el.remove())
-  })
-
-  room.on(lk.RoomEvent.LocalTrackPublished, (pub) => {
-    if (pub.track?.source === lk.Track.Source.ScreenShare && pub.track.kind === lk.Track.Kind.Video) {
-      voiceStore.set({
-        isScreenSharing: true,
-        screenShareTrack: pub.track.mediaStreamTrack,
-        screenShareParticipant: { id: room.localParticipant.identity, name: room.localParticipant.name || room.localParticipant.identity },
-      })
-    }
-  })
-
-  room.on(lk.RoomEvent.LocalTrackUnpublished, (pub) => {
-    if (pub.source === lk.Track.Source.ScreenShare) {
-      voiceStore.set({ isScreenSharing: false, screenShareTrack: null, screenShareParticipant: null })
-    }
-  })
-
-  room.on(lk.RoomEvent.Disconnected, () => {
-    voiceStore.set({
-      isConnected: false, participants: [], connectedRoomSlug: null, connectedRoomName: null,
-      isMuted: false, isDeafened: false, isSpeaking: false,
-      isScreenSharing: false, screenShareTrack: null, screenShareParticipant: null,
-    })
-    room = null
-    activeBackend = null
-    deletePresence()
-  })
-
-  await room.connect(livekitUrl, token)
-  await room.localParticipant.setMicrophoneEnabled(true)
-
-  // Now tear down P2P (LiveKit is connected and handling audio)
-  leaveRoomP2P()
-  activeBackend = 'livekit'
-
-  voiceStore.set({
-    isConnected: true, isConnecting: false, isMuted: false, isDeafened: false,
-    connectedRoomSlug: slug, connectedRoomName: name,
-  })
-  updateLiveKitParticipants()
-}
-
-function leaveRoomLiveKit() {
-  if (room) {
-    room.remoteParticipants.forEach(p => {
-      p.getTrackPublications().forEach(pub => {
-        if (pub.track) pub.track.detach().forEach(el => el.remove())
-      })
-    })
-    room.disconnect()
-    room = null
-  }
-}
-
-function updateLiveKitParticipants() {
-  if (!room || !livekitModule) return
-  const lk = livekitModule
-  const remotes = Array.from(room.remoteParticipants.values()).map(p => {
-    const audioTrack = p.getTrackPublications().find(t => t.track?.source === lk.Track.Source.Microphone)
-    return {
-      id: p.identity,
-      name: p.name || p.identity,
-      avatar: (p.name || p.identity).charAt(0).toUpperCase(),
-      avatarUrl: avatarCache[p.identity] ?? null,
-      isSpeaking: p.isSpeaking,
-      isMuted: audioTrack?.isMuted ?? true,
-    }
-  })
-  voiceStore.set({
-    participants: remotes,
-    isSpeaking: room.localParticipant.isSpeaking,
-  })
-
-  const uncached = remotes.filter(p => avatarCache[p.id] === undefined)
-  if (uncached.length > 0) {
-    const ids = uncached.map(p => p.id).join(',')
-    fetch(`/api/profiles/batch?ids=${encodeURIComponent(ids)}`)
-      .then(r => r.json())
-      .then(data => {
-        for (const profile of data) avatarCache[profile.id] = profile.avatar_url
-        for (const p of uncached) {
-          if (avatarCache[p.id] === undefined) avatarCache[p.id] = null
-        }
-        updateLiveKitParticipants()
-      })
-      .catch(() => {})
-  }
+  if (session) { session.destroy(); session = null }
 }
