@@ -1,6 +1,7 @@
 package forum
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -11,6 +12,7 @@ import (
 	"time"
 
 	"github.com/go-chi/chi/v5"
+	"github.com/golang-jwt/jwt/v5"
 	shared "github.com/forumline/forumline/shared-go"
 )
 
@@ -182,7 +184,17 @@ func (h *Handlers) HandleCreatePost(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusCreated, map[string]string{"id": id})
 }
 
+// forumlinePushItem holds a notification to be pushed to forumline.
+type forumlinePushItem struct {
+	ForumlineUserID string `json:"forumline_user_id"`
+	Type            string `json:"type"`
+	Title           string `json:"title"`
+	Body            string `json:"body"`
+	Link            string `json:"link"`
+}
+
 // generatePostNotifications creates notification rows for @mentions and thread reply notifications.
+// After inserting locally, it batches and pushes to forumline for users with a forumline_id.
 func (h *Handlers) generatePostNotifications(threadID, postID, authorID, content string, replyToID *string) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
@@ -207,18 +219,41 @@ func (h *Handlers) generatePostNotifications(threadID, postID, authorID, content
 	threadLink := fmt.Sprintf("/t/%s", threadID)
 	notified := map[string]bool{authorID: true} // don't notify the post author
 
-	// 1. Notify thread author about the reply (unless they're the one replying)
-	if threadAuthorID != "" && !notified[threadAuthorID] {
-		notified[threadAuthorID] = true
+	// Collect forumline push items
+	var pushItems []forumlinePushItem
+
+	// helper: insert local notification and queue forumline push
+	notifyUser := func(userID, notifType, title, body, link string) {
 		_, err := h.Pool.Exec(ctx,
 			`INSERT INTO notifications (user_id, type, title, message, link)
 			 VALUES ($1, $2, $3, $4, $5)`,
-			threadAuthorID, "reply",
+			userID, notifType, title, body, link)
+		if err != nil {
+			log.Printf("[notifications] failed to insert for %s: %v", userID, err)
+			return
+		}
+
+		// Look up forumline_id for push
+		var forumlineID *string
+		_ = h.Pool.QueryRow(ctx,
+			`SELECT forumline_id FROM profiles WHERE id = $1`, userID).Scan(&forumlineID)
+		if forumlineID != nil && *forumlineID != "" {
+			pushItems = append(pushItems, forumlinePushItem{
+				ForumlineUserID: *forumlineID,
+				Type:            notifType,
+				Title:           title,
+				Body:            body,
+				Link:            link,
+			})
+		}
+	}
+
+	// 1. Notify thread author about the reply (unless they're the one replying)
+	if threadAuthorID != "" && !notified[threadAuthorID] {
+		notified[threadAuthorID] = true
+		notifyUser(threadAuthorID, "reply",
 			fmt.Sprintf("<strong>%s</strong> replied in \"%s\"", authorUsername, threadTitle),
 			truncate(content, 200), threadLink)
-		if err != nil {
-			log.Printf("[notifications] failed to notify thread author: %v", err)
-		}
 	}
 
 	// 2. If this is a reply to a specific post, notify that post's author
@@ -228,15 +263,9 @@ func (h *Handlers) generatePostNotifications(threadID, postID, authorID, content
 			`SELECT author_id FROM posts WHERE id = $1`, *replyToID).Scan(&replyAuthorID)
 		if replyAuthorID != "" && !notified[replyAuthorID] {
 			notified[replyAuthorID] = true
-			_, err := h.Pool.Exec(ctx,
-				`INSERT INTO notifications (user_id, type, title, message, link)
-				 VALUES ($1, $2, $3, $4, $5)`,
-				replyAuthorID, "reply",
+			notifyUser(replyAuthorID, "reply",
 				fmt.Sprintf("<strong>%s</strong> replied to your post in \"%s\"", authorUsername, threadTitle),
 				truncate(content, 200), threadLink)
-			if err != nil {
-				log.Printf("[notifications] failed to notify reply parent author: %v", err)
-			}
 		}
 	}
 
@@ -249,16 +278,68 @@ func (h *Handlers) generatePostNotifications(threadID, postID, authorID, content
 			`SELECT id FROM profiles WHERE lower(username) = $1`, username).Scan(&mentionedUserID)
 		if mentionedUserID != "" && !notified[mentionedUserID] {
 			notified[mentionedUserID] = true
-			_, err := h.Pool.Exec(ctx,
-				`INSERT INTO notifications (user_id, type, title, message, link)
-				 VALUES ($1, $2, $3, $4, $5)`,
-				mentionedUserID, "mention",
+			notifyUser(mentionedUserID, "mention",
 				fmt.Sprintf("<strong>%s</strong> mentioned you in \"%s\"", authorUsername, threadTitle),
 				truncate(content, 200), threadLink)
-			if err != nil {
-				log.Printf("[notifications] failed to notify mentioned user %s: %v", username, err)
-			}
 		}
+	}
+
+	// Push batch to forumline
+	if len(pushItems) > 0 {
+		h.pushToForumline(pushItems)
+	}
+}
+
+// pushToForumline sends a batch of notifications to the forumline API webhook.
+func (h *Handlers) pushToForumline(items []forumlinePushItem) {
+	if h.Config.ForumlineURL == "" || h.Config.ForumlineJWTSecret == "" {
+		return
+	}
+
+	// Sign a JWT: sub=forum domain, iss="forum"
+	now := time.Now()
+	token := jwt.NewWithClaims(jwt.SigningMethodHS256, jwt.RegisteredClaims{
+		Subject:   h.Config.Domain,
+		Issuer:    "forum",
+		IssuedAt:  jwt.NewNumericDate(now),
+		ExpiresAt: jwt.NewNumericDate(now.Add(time.Minute)),
+	})
+	tokenStr, err := token.SignedString([]byte(h.Config.ForumlineJWTSecret))
+	if err != nil {
+		log.Printf("[notifications] failed to sign forumline token: %v", err)
+		return
+	}
+
+	var endpoint string
+	var payload []byte
+	if len(items) == 1 {
+		endpoint = h.Config.ForumlineURL + "/api/webhooks/notification"
+		payload, _ = json.Marshal(items[0])
+	} else {
+		endpoint = h.Config.ForumlineURL + "/api/webhooks/notifications"
+		payload, _ = json.Marshal(items)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+
+	req, err := http.NewRequestWithContext(ctx, "POST", endpoint, bytes.NewReader(payload))
+	if err != nil {
+		log.Printf("[notifications] failed to create forumline request: %v", err)
+		return
+	}
+	req.Header.Set("Authorization", "Bearer "+tokenStr)
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		log.Printf("[notifications] push to forumline failed: %v", err)
+		return
+	}
+	_ = resp.Body.Close()
+
+	if resp.StatusCode >= 300 {
+		log.Printf("[notifications] forumline webhook returned HTTP %d", resp.StatusCode)
 	}
 }
 
