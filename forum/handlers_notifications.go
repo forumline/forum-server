@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"time"
 
+	"github.com/golang-jwt/jwt/v5"
 	shared "github.com/forumline/forumline/shared-go"
 )
 
@@ -231,17 +232,15 @@ func (h *Handlers) HandleNotificationStream(w http.ResponseWriter, r *http.Reque
 }
 
 // authenticateFromHeader extracts and validates the JWT from the Authorization header.
+// Tries the forum's JWT_SECRET first, then falls back to ForumlineJWTSecret so
+// the forumline-api can call notification endpoints on behalf of users.
 func (h *Handlers) authenticateFromHeader(r *http.Request) (string, error) {
 	auth := r.Header.Get("Authorization")
 	if auth == "" {
 		// Try query param (for EventSource/SSE)
 		token := r.URL.Query().Get("access_token")
 		if token != "" {
-			claims, err := shared.ValidateJWT(token)
-			if err != nil {
-				return "", err
-			}
-			return claims.Subject, nil
+			return h.validateTokenWithFallback(token)
 		}
 		return "", fmt.Errorf("missing authorization")
 	}
@@ -249,9 +248,27 @@ func (h *Handlers) authenticateFromHeader(r *http.Request) (string, error) {
 		return "", fmt.Errorf("invalid authorization header")
 	}
 	token := auth[7:]
+	return h.validateTokenWithFallback(token)
+}
+
+// validateTokenWithFallback tries JWT_SECRET first, then ForumlineJWTSecret.
+func (h *Handlers) validateTokenWithFallback(token string) (string, error) {
 	claims, err := shared.ValidateJWT(token)
-	if err != nil {
-		return "", err
+	if err == nil {
+		return claims.Subject, nil
 	}
-	return claims.Subject, nil
+	if h.Config.ForumlineJWTSecret != "" {
+		parsed, parseErr := jwt.ParseWithClaims(token, &jwt.RegisteredClaims{}, func(t *jwt.Token) (interface{}, error) {
+			if _, ok := t.Method.(*jwt.SigningMethodHMAC); !ok {
+				return nil, fmt.Errorf("unexpected signing method")
+			}
+			return []byte(h.Config.ForumlineJWTSecret), nil
+		})
+		if parseErr == nil && parsed.Valid {
+			if rc, ok := parsed.Claims.(*jwt.RegisteredClaims); ok && rc.Subject != "" {
+				return rc.Subject, nil
+			}
+		}
+	}
+	return "", err
 }
